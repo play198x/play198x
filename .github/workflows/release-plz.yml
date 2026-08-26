@@ -1,0 +1,60 @@
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+# No PAT: the default GITHUB_TOKEN drives everything. Opening the release PR
+# needs the org/repo setting "Allow GitHub Actions to create and approve pull
+# requests" enabled (Settings -> Actions -> General). id-token is what lets
+# release-plz publish to crates.io over Trusted Publishing — no stored token.
+permissions:
+  pull-requests: write
+  contents: write
+  id-token: write
+
+jobs:
+  release-plz:
+    name: Release-plz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      # Open/update the "chore: release" PR for new commits.
+      - name: Run release-plz (open/update release PR)
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Once a release PR is merged, tag the crate and publish it. publish = true
+      # in release-plz.toml, so release-plz runs cargo publish itself, exchanging
+      # the id-token above for a crates.io Trusted Publishing token. Pairing that
+      # with crates-io-auth-action and a CARGO_REGISTRY_TOKEN is what release-plz
+      # documents *not* to do, so there is no separate auth or publish step here.
+      - name: Run release-plz (tag and publish merged releases)
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

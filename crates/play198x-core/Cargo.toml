@@ -1,0 +1,49 @@
+[package]
+name = "play198x-core"
+# Published and independently versioned from the first release. Siblings are
+# told to consume this (studio198x-authoring.md clause 4), and a crate marked
+# publish = false cannot be consumed from another org — the trap recorded as
+# emu198x/emu198x#1214. Stated explicitly rather than left to cargo default,
+# so that inverting it has to be a deliberate edit rather than an omission.
+publish = true
+version = "0.1.0"
+description = "Open, identify and render retro media — Spectrum, C64 and Amiga images, and ProTracker modules."
+keywords = ["retro", "amiga", "protracker", "c64", "spectrum"]
+categories = ["multimedia", "emulators"]
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Each dependency arrives with the task that first uses it — the ADF and
+# PowerPacker crates with disk images, `mediaspec198x` and the image crates with
+# decoding — so the manifest never claims a dependency the code does not need.
+[dependencies]
+# ZIP container reading and, in the tests, writing. Default features are off
+# deliberately: zip's defaults pull AES, bzip2, LZMA, PPMd, zstd, XZ and
+# Deflate64, none of which an archive of retro media uses. DEFLATE is the one
+# method real archives of this material are stored with.
+#
+# `deflate-flate2-zlib-rs` rather than the `deflate` umbrella, which also pulls
+# `deflate-zopfli`. Zopfli is a best-compression *writer*; this crate only
+# reads, and the test writer asks for `CompressionMethod::Deflated`, which
+# flate2 handles. Naming the one backend drops `zopfli`, `bumpalo` and `log`
+# from every consumer's graph.
+zip = { version = "8", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+] }
+
+# Amiga disk images. 0.2.3 specifically: it is the release that tells a
+# non-DOS disk apart from a damaged one, and names the containers (IPF, DMS,
+# and the like) that are Amiga media but not raw sector images. Earlier
+# releases fold both into "corrupt", which is the mistake this task exists to
+# avoid making downstream.
+format198x-commodore-amiga-adf = "0.2.3"
+# PowerPacked files decrunch on the way out of `read`, whatever container they
+# arrived in, so the dependency belongs to the container layer rather than the
+# decoders.
+format198x-commodore-amiga-powerpacker = "0.1.1"
+
+[lints]
+workspace = true

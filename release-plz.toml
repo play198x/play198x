@@ -1,0 +1,32 @@
+# release-plz configuration.
+#
+# On each push to main, release-plz opens (or updates) a "chore: release" PR
+# (version bump + CHANGELOG from conventional-commit prefixes). Merging it makes
+# release-plz.yml tag the crate and publish it to crates.io — no PAT, no stored
+# registry token.
+#
+# git_only is deliberately NOT set. It takes a crate's baseline from its git tag
+# instead of the registry, and exists for crates that are never published and so
+# have no registry version to compare against. This crate publishes, so the
+# registry IS its baseline — and release-plz rejects the pair outright:
+# "Config options 'git_only' and 'publish' are mutually exclusive."
+#
+# Worth stating rather than just omitting: this file was copied from a
+# publish = false sibling, where git_only is correct. Flipping publish without
+# removing git_only broke build198x's main on 2026-08-26, and the check runs
+# only in the release job — which never runs on a pull request, so every PR
+# stayed green and main broke on merge.
+[workspace]
+# publish = true: release-plz runs cargo publish itself, over Trusted Publishing
+# using the workflow's id-token permission. Unlike build198x's setup, there is
+# no separate publish step, and deliberately no crates-io-auth-action alongside
+# this — release-plz's own documentation says not to pair the two.
+publish = true
+git_release_enable = true
+git_tag_enable = true
+changelog_update = true
+# Package-prefixed tags (<crate>-v<version>) even while there's a single crate:
+# it matches the baseline tag and keeps future multi-crate tags unambiguous.
+# Without this, a single-crate workspace defaults to the bare `v<version>`,
+# which misses the baseline tag and re-releases the published version.
+git_tag_name = "{{ package }}-v{{ version }}"
