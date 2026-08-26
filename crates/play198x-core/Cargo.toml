@@ -16,11 +16,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Deliberately empty. Each dependency arrives in the task that first uses it —
-# `zip` with the ZIP container, the ADF and PowerPacker crates with disk images,
-# `mediaspec198x` and the image crates with decoding — so that the manifest
-# never claims a dependency the code does not yet need.
+# Each dependency arrives with the task that first uses it — the ADF and
+# PowerPacker crates with disk images, `mediaspec198x` and the image crates with
+# decoding — so the manifest never claims a dependency the code does not need.
 [dependencies]
+# ZIP container reading and, in the tests, writing. Default features are off
+# deliberately: zip's defaults pull AES, bzip2, LZMA, PPMd, zstd, XZ and
+# Deflate64, none of which an archive of retro media uses. DEFLATE is the one
+# method real archives of this material are stored with.
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

@@ -10,7 +10,10 @@ members = ["crates/play198x-core"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.87"
+# The MSRV is the toolchain this workspace is actually built and tested with
+# (`rust-toolchain.toml`, and CI). Declaring anything lower would assert a floor
+# nothing ever compiles against — and an unverified claim is worse than none.
+rust-version = "1.98"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/play198x/play198x"
 
