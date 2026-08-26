@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{Cell, SampleSpec, module, square};
+use common::{Cell, SampleSpec, left, modulation_hz, module, pitch_track, square};
 use format198x_commodore_amiga_mod::Module;
 use play198x_core::engine::Engine;
 
@@ -85,84 +85,9 @@ fn a_per_tick_effect_runs_speed_minus_one_times_per_row() {
 // Measurement helpers
 // ---------------------------------------------------------------------------
 
-fn left(interleaved: &[f32]) -> impl Iterator<Item = f32> + '_ {
-    interleaved.as_chunks::<2>().0.iter().map(|frame| frame[0])
-}
-
 /// Amplitude of a full-scale byte at `volume`, after the mixer's voice gain.
 fn level(sample_byte: i8, volume: u8) -> f32 {
     f32::from(sample_byte) / 128.0 * f32::from(volume) / 64.0 * 0.5
-}
-
-/// The pitch of every waveform cycle in the left channel: `(frame, hz)`.
-///
-/// Per waveform cycle, from positive-going zero crossings — never
-/// autocorrelation over a window, which locks onto multiples of the true
-/// period and reported one rate as *slower* than another twice its speed on
-/// this project on 2026-08-25.
-fn pitch_track(interleaved: &[f32], sample_rate: f64) -> Vec<(f64, f64)> {
-    let mut crossings = Vec::new();
-    let mut previous = 0f32;
-    for (index, value) in left(interleaved).enumerate() {
-        if previous <= 0.0 && value > 0.0 {
-            crossings.push(index);
-        }
-        previous = value;
-    }
-    crossings
-        .windows(2)
-        .map(|pair| {
-            let cycle = (pair[1] - pair[0]) as f64;
-            (pair[0] as f64 / sample_rate, sample_rate / cycle)
-        })
-        .collect()
-}
-
-/// How fast a pitch track wobbles, in Hz.
-///
-/// A Schmitt trigger, not a plain mean crossing, and the reason is a real
-/// ProTracker behaviour rather than measurement fussiness: `4xy` is a `fx_tab`
-/// effect, so on the row's *note* tick `morefx_tab` falls through to
-/// `mt_pernop` and the period snaps back to the un-wobbled one for 20 ms. That
-/// notch sits exactly on the mean and crosses it twice a row, so counting mean
-/// crossings measures 9.3 Hz for a 6.51 Hz vibrato — the row rate leaking into
-/// the answer again. Thresholds at a third of the swing cannot see a notch
-/// that only reaches the middle of it.
-///
-/// The rate is taken between the first and last upward trigger rather than
-/// over the whole buffer, so a partial cycle at either end cannot bias it.
-fn modulation_hz(track: &[(f64, f64)]) -> f64 {
-    assert!(track.len() > 8, "too few waveform cycles to see a wobble");
-    let span = track[track.len() - 1].0 - track[0].0;
-    assert!(
-        span >= 0.5,
-        "a {span:.3} s span cannot separate a vibrato from a row rate"
-    );
-    let mean = track.iter().map(|(_, hz)| hz).sum::<f64>() / track.len() as f64;
-    let swing = track
-        .iter()
-        .map(|(_, hz)| (hz - mean).abs())
-        .fold(0.0f64, f64::max);
-    let threshold = swing / 3.0;
-
-    let mut state = 0i8;
-    let mut upward: Vec<f64> = Vec::new();
-    for (at, hz) in track {
-        if hz - mean > threshold {
-            if state < 0 {
-                upward.push(*at);
-            }
-            state = 1;
-        } else if mean - hz > threshold {
-            state = -1;
-        }
-    }
-    assert!(
-        upward.len() >= 3,
-        "only {} wobbles in {span:.2} s is too few to call a rate",
-        upward.len()
-    );
-    (upward.len() - 1) as f64 / (upward[upward.len() - 1] - upward[0])
 }
 
 // ---------------------------------------------------------------------------
