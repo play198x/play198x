@@ -102,12 +102,26 @@ pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
     // Art Studio's trailing seven-byte pad is optional in the wild, so the
     // length is a small range rather than a single number. Both ends come from
     // the crate that decodes it.
+    //
+    // `Probable`, not `Certain`, and the reason is what happens downstream
+    // rather than the strength of the two signals here. `$2000` is about the
+    // commonest load address on the C64, so the evidence is a very ordinary
+    // address plus an eight-byte-wide length window. That would be tolerable if
+    // anything later could catch a miss — but the Art Studio decoder checks
+    // exactly these two facts and nothing else, so a file that is not one
+    // decodes *successfully* into a wrong-looking picture. There is no second
+    // check anywhere in the pipeline.
+    //
+    // Reporting it as `Probable` is the only place that doubt can be expressed,
+    // and it lets a shell show the result with a caveat instead of asserting a
+    // picture it cannot stand behind. Koala earns `Certain` on the same shape
+    // of evidence because `$6000` is unusual and its length is exact.
     if load_address == Some(format198x_commodore_c64_art_studio::LOAD_ADDRESS)
         && (format198x_commodore_c64_art_studio::MIN_FILE_LEN
             ..=format198x_commodore_c64_art_studio::FILE_LEN)
             .contains(&bytes.len())
     {
-        return Some((Format::ArtStudio, Confidence::Certain));
+        return Some((Format::ArtStudio, Confidence::Probable));
     }
 
     // Last, and only ever `Probable`. A SCR is a raw dump of Spectrum screen

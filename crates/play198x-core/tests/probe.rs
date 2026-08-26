@@ -109,7 +109,7 @@ fn an_art_studio_bitmap_is_identified_with_or_without_its_trailing_pad() {
     ] {
         assert_eq!(
             identify(&synthetic_art_studio(len)),
-            Some((Format::ArtStudio, Confidence::Certain)),
+            Some((Format::ArtStudio, Confidence::Probable)),
             "an Art Studio bitmap of {len} bytes"
         );
     }
@@ -218,7 +218,10 @@ fn a_uniform_sweep_reaches_every_rule_once_the_signals_are_real() {
         (
             synthetic_art_studio(format198x_commodore_c64_art_studio::FILE_LEN),
             Format::ArtStudio,
-            Confidence::Certain,
+            // Probable: $2000 is the commonest C64 load address and nothing
+            // downstream can catch a miss -- the Art Studio decoder checks
+            // exactly what identify already checked.
+            Confidence::Probable,
         ),
         (
             vec![0u8; format198x_sinclair_zx_spectrum_scr::FILE_LEN],
