@@ -18,7 +18,9 @@
 //! because at speed 5 the 0.100 s row period dominated the envelope.
 //!
 //! `tests/README.md` records what this harness measures, what it deliberately
-//! does not, and the one place the two players differ on purpose.
+//! does not, and what came of the one disagreement it found — a tremolo half
+//! as deep as both other players', settled against us by ProTracker's own
+//! source and fixed on 2026-08-26.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -622,16 +624,19 @@ fn the_volume_slide_envelope_agrees_with_libxmp() {
 
 #[test]
 #[ignore = "needs the xmp CLI; run with -- --ignored"]
-fn the_tremolo_rate_agrees_with_libxmp_but_its_depth_is_twice_ours() {
+fn the_tremolo_rate_and_depth_agree_with_libxmp() {
     // 7A4 from a stored volume of 32. Amplitude 4 and a mid-scale base so that
     // neither player's swing reaches 0 or 64: tremolo clamps at both ends, and
     // a clamped envelope is a flat-topped wave whose modulation rate reads
     // 8.13 Hz instead of 6.51 — the measurement this harness got first, from a
     // fixture at full volume, and reported as a rate disagreement that was
-    // really an amplitude one.
+    // really an amplitude one. At the corrected shift-by-6 depth the headroom
+    // matters more, not less: amplitude 4 swings +/-15 here, and amplitude 15
+    // would swing +/-59 and clamp on every peak.
     //
-    // The depth *is* a real disagreement, and it is recorded rather than
-    // tolerated: see tests/README.md.
+    // The depth used to disagree by 2.14x and the harness asserted that ratio
+    // as a recorded difference. ProTracker's own source has since settled it
+    // against us; see tests/README.md.
     let mut report = Report::new("held C-2 with tremolo 7A4 from volume 32, speed 6");
     let bytes = held_bytes_with_sample(square_sample(32), 0x07, 0xA4, 64);
     let ours = render_with_ours(&bytes, 4.0);
@@ -651,57 +656,52 @@ fn the_tremolo_rate_agrees_with_libxmp_but_its_depth_is_twice_ours() {
     );
 
     // Depth as a fraction of the un-modulated level, so the two players' mixer
-    // gains cancel. The replayer's table gives `SINE[pos & 31] * 4 / 128`, at
-    // most 7 either way, against a stored volume of 32: 7/32 = 0.21875.
+    // gains cancel. `mt_tre_set` gives `SINE[pos & 31] * 4 / 64`, at most 15
+    // either way, against a stored volume of 32: 15/32 = 0.46875.
     let depth = |env: &[(f64, f64)]| {
         let values: Vec<f64> = env.iter().skip(20).map(|(_, v)| *v).collect();
         let (lo, hi) = spread(values, 0.05);
         (hi - lo) / (hi + lo)
     };
-    report.note("replayer-derived depth", 7.0 / 32.0, "of level");
+    report.note("replayer-derived depth", 15.0 / 32.0, "of level");
     let ours_depth = depth(&ours_env);
     let theirs_depth = depth(&theirs_env);
     let depth_delta = report.compare("tremolo depth", ours_depth, theirs_depth, "of level");
     report.note("depth ratio, xmp / ours", theirs_depth / ours_depth, "x");
 
-    // Pearson over the two envelopes. High correlation beside a depth ratio of
-    // 2 is the finding in two numbers: same waveform, same phase, same rate,
-    // twice the amplitude. It reads 0.91 rather than 1.00 because the envelope
-    // is a peak-per-window reading of an integer volume, and a swing of +/-7
-    // lands on half as many distinct levels as one of +/-15 — the quantisation
-    // differs even though the shape does not.
+    // Pearson over the two envelopes. It reads 0.9133 with the depths in exact
+    // agreement, against 0.9125 when they differed by 2.14x — so the residual
+    // was never the depth. It is the 10 ms peak-per-window reading of an
+    // integer volume against two different mixers, and this assertion is a
+    // shape check, not a depth one. The depth check is `depth_delta` below.
     let correlation = pearson(&ours_env, &theirs_env);
     report.note("envelope correlation", correlation, "");
 
     assert!(
-        (ours_depth - 7.0 / 32.0).abs() / (7.0 / 32.0) < 0.05,
-        "our tremolo swings {ours_depth:.5} of the level, not the 0.21875 the \
-         replayer's table gives for amplitude 4 at volume 32"
+        (ours_depth - 15.0 / 32.0).abs() / (15.0 / 32.0) < 0.05,
+        "our tremolo swings {ours_depth:.5} of the level, not the 0.46875 \
+         `mt_tre_set` gives for amplitude 4 at volume 32"
     );
-    // Measured 2026-08-26, xmp 4.3.1 / libxmp 4.7.2: rate -0.02%, depth
-    // +114.29%, ratio 2.1429, correlation 0.9125.
+    // Measured 2026-08-26, xmp 4.3.1 / libxmp 4.7.2: rate -0.02%, depth +0.00%
+    // (both 0.4688 of level, ratio 1.0000), correlation 0.9133.
     assert!(
         rate_delta.abs() < 3.0,
         "tremolo rate differs by {rate_delta:+.2}%, measured -0.02%"
     );
     assert!(
         correlation > 0.85,
-        "tremolo envelope correlation {correlation:.6}, measured 0.9125 — the \
-         two swings are meant to differ in depth only, not in shape"
+        "tremolo envelope correlation {correlation:.6}, measured 0.9133 — the \
+         two envelopes are meant to be the same shape at the same depth"
     );
-    // The depth ratio is asserted rather than ignored, so this stays a recorded
-    // difference and not a blind spot. If libxmp ever matches the replayer this
-    // fails — and the fix then is to tighten the bound towards 1 and delete the
-    // README entry, never to widen it.
+    // The two players agree on depth exactly: both swing 0.4688 of the level,
+    // so 2% is slack rather than calibration, the same slack the volume slide
+    // gets for the same reason — both step identical integer volumes. This
+    // bound is set from the measured agreement. Widening it would give back
+    // the finding ProTracker's own source was acquired to settle.
     assert!(
-        (1.9..2.4).contains(&(theirs_depth / ours_depth)),
-        "xmp's tremolo is {:.3}x ours; the recorded difference is 2.14x, and a \
-         different figure is a new finding to read the replayer about",
-        theirs_depth / ours_depth
-    );
-    assert!(
-        depth_delta > 0.0,
-        "the recorded difference is xmp swinging deeper, not shallower"
+        depth_delta.abs() < 2.0,
+        "tremolo depth differs by {depth_delta:+.2}%, measured +0.00% — the \
+         shift-by-6 in `mt_tre_set` is what makes these agree"
     );
 }
 

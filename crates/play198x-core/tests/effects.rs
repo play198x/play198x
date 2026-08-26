@@ -354,12 +354,10 @@ fn set_volume_applies_at_the_note_tick_with_or_without_a_note() {
     assert_eq!(engine.debug_channel_volume(0), 64, "C50 clamps to 64");
 }
 
-#[test]
-fn tremolo_swings_the_volume_around_the_stored_one() {
-    // 7AF: speed 10, amplitude 15, from volume 32. The sine table's offsets at
-    // positions 0, 10, 20, 30 and 40 are 0, +24, +27, +5 and -21 — computed as
-    // `SINE[pos & 31] * 15 / 128`, negated past position 32.
-    let mut engine = Engine::new(
+/// A held note at stored volume 32 with one tremolo command, rendered a tick
+/// at a time. Returns the engine; the caller reads the peak per tick.
+fn tremolo_from_volume_32(param: u8) -> Engine {
+    Engine::new(
         module(
             &[SampleSpec {
                 data: square(32, 1, 100),
@@ -373,16 +371,20 @@ fn tremolo_swings_the_volume_around_the_stored_one() {
                 sample: 1,
                 period: 428,
                 effect: 0x07,
-                param: 0xAF,
+                param,
             }]],
             &[0],
             1,
         ),
         RATE,
-    );
+    )
+}
 
+/// Asserts the per-tick peak against `level(100, volume)` for each expected
+/// stored-volume value in turn.
+fn assert_tick_volumes(engine: &mut Engine, expected: &[u8]) {
     let mut buf = vec![0f32; TICK_FRAMES * 2];
-    for (tick, expected_volume) in [32u8, 32, 56, 59, 37, 11].into_iter().enumerate() {
+    for (tick, expected_volume) in expected.iter().copied().enumerate() {
         engine.render(&mut buf);
         let peak = left(&buf).fold(0f32, |peak, value| peak.max(value.abs()));
         let expected = level(100, expected_volume);
@@ -391,6 +393,35 @@ fn tremolo_swings_the_volume_around_the_stored_one() {
             "tick {tick}: peak {peak}, expected {expected} (volume {expected_volume})"
         );
     }
+}
+
+#[test]
+fn tremolo_swings_the_volume_around_the_stored_one() {
+    // 7A7: speed 10, amplitude 7, from volume 32. Tremolo shifts the product
+    // by 6 where vibrato shifts by 7 (`mt_tre_set` against `mt_vib_set` in
+    // `protracker-23f-replay-cia.s`), so an offset is `SINE[pos & 31] * 7 / 64`
+    // — twice what the same amplitude gives vibrato. At positions 0, 10, 20, 30
+    // and 40 that is 0, +23, +25, +5 and -19, negated past position 32.
+    //
+    // Amplitude 7 rather than 15 on purpose: 32 +/- 25 leaves headroom at both
+    // ends, so this test measures depth and nothing else. The clamp is
+    // `tremolo_clamps_the_volume_at_both_ends`.
+    let mut engine = tremolo_from_volume_32(0xA7);
+    assert_tick_volumes(&mut engine, &[32, 32, 55, 57, 37, 13]);
+}
+
+#[test]
+fn tremolo_clamps_the_volume_at_both_ends() {
+    // 7AF from volume 32. At the full shift-by-6 depth an amplitude-15 offset
+    // reaches +/-59, so the same fixture runs off both ends of `0..=64`:
+    // positions 10 and 20 want 81 and 87, and position 40 wants -10.
+    // `mt_Tremolo3` clamps in a word — `BPL`/`CLR.W` below zero, then
+    // `CMP.W #64`/`MOVE.W #64` above 64 — so they sound as 64, 64 and 0.
+    //
+    // Under the old shift-by-7 reading none of these clamped, which is why the
+    // clamp needs pinning now and did not before.
+    let mut engine = tremolo_from_volume_32(0xAF);
+    assert_tick_volumes(&mut engine, &[32, 32, 64, 64, 43, 0]);
 }
 
 // ---------------------------------------------------------------------------

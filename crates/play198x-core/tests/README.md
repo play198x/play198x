@@ -93,25 +93,31 @@ Measured 2026-08-26 against xmp 4.3.1 linking libxmp 4.7.2, at 44.1 kHz:
 | Volume slide, `A01` | 0.0781 of full/row | 0.0781 of full/row | +0.00% |
 | Volume-slide envelope | — | — | r = 1.0000 |
 | Tremolo rate, `7A4` | 6.4865 Hz | 6.4854 Hz | −0.02% |
-| **Tremolo depth, `7A4`** | **0.2188 of level** | **0.4688 of level** | **+114.29%** |
+| Tremolo depth, `7A4` | 0.4688 of level | 0.4688 of level | +0.00% |
+| Tremolo envelope | — | — | r = 0.9133 |
 
 The carrier reads 259.4118 Hz in both against a replayer-derived 258.9730,
 because a cycle of 170.29 frames at 44.1 kHz can only be counted as 170. Both
 players quantise it identically, which is the point: the 0.17% is the frame
 grid, not a disagreement.
 
-## Where we differ from libxmp on purpose
+## The one disagreement this harness found, and how it closed
 
-### Tremolo depth — we swing half as deep, and the replayer source says to
+### Tremolo depth — libxmp was right, and ProTracker's own source says why
 
-**The disagreement.** With `7A4` from a stored volume of 32, this engine swings
-the volume by ±7 (0.2188 of the level) and libxmp swings it by ±15 (0.4688).
-The ratio is 2.14. Everything else about the two envelopes matches: same rate
-(−0.02%), same waveform, same phase, correlation 0.9125.
+**Closed 2026-08-26.** This section used to record an open difference. It is
+settled, against this engine, and the engine has been changed.
 
-**What the replayer says.** `protracker-23b-playroutine.asm` — the binding
-source under `reference/by-topic/music-formats/`, Frank Wille's Protracker
-V2.3B Playroutine v6.3 — computes the tremolo table offset at line 2202 as
+**What the harness measured.** With `7A4` from a stored volume of 32, this
+engine swung the volume by ±7 (0.2188 of the level) where libxmp swung it by
+±15 (0.4688) — a ratio of 2.14. libopenmpt 0.8.9 agreed with libxmp, at 0.4351
+on the same fixture. Rate (−0.02%), waveform and phase all matched; only the
+scale differed. Two independent mature players agreeing against us was the
+signal to go and find a better source, not to widen a tolerance.
+
+**Why we had it wrong.** The engine was built from
+`protracker-23b-playroutine.asm`, Frank Wille's Protracker V2.3B Playroutine
+v6.3, which computes the tremolo table offset at line 2202 as
 
 ```
 	; calculate tremolo table offset: 64 * amplitude + (pos & 63)
@@ -123,27 +129,41 @@ V2.3B Playroutine v6.3 — computes the tremolo table offset at line 2202 as
 
 and reads it out of `mt_VibratoSineTable` at line 2226 — the *same* table, at
 the *same* offset formula, that `mt_vibrato` uses at lines 2127 and 2151. There
-is only one such table in the file. So in this replayer tremolo and vibrato have
-identical depth: `SINE[pos & 31] * amplitude / 128`, at most 29 for amplitude
-15. This engine implements that, and `effects.rs` pins the resulting per-tick
-volumes (32, 32, 56, 59, 37, 11) against it.
+is only one such table in the file, so in that replayer tremolo and vibrato have
+identical depth. The engine faithfully implemented what the file said.
 
-**The unresolved part, stated rather than smoothed over.** libopenmpt 0.8.9
-swings tremolo the same doubled amount as libxmp — measured at 0.4351 of the
-level on the same fixture, ±14.3 volume units against our ±7. Two independent
-mature players agree against us, which is exactly the signal worth taking
-seriously rather than explaining away. The likely explanation is that
-ProTracker 2.3's own source shifts the tremolo product by 6 and the vibrato
-product by 7 — the widely-repeated "tremolo is twice as deep as vibrato" quirk —
-and that Wille's table-based rewrite folded both onto the one precomputed table.
-**We do not hold ProTracker 2.3's own source**, so this cannot be settled from
-the `reference/` layer as it stands. It needs that source acquiring.
+**What settled it.** ProTracker's own source was acquired:
+`protracker-23f-replay-cia.s`, Olav Sørensen's disassembly and re-source of
+ProTracker 2.3D (BSD-3-Clause), now under `reference/by-topic/music-formats/`.
+It runs the identical multiply in both effects and shifts the product by one bit
+less for tremolo:
 
-Until then the engine follows the file the reference names as executable truth,
-and the harness asserts the ratio (1.9–2.4) rather than ignoring it, so the
-difference stays recorded instead of becoming a blind spot. **If libxmp ever
-matches the replayer, that assertion fails — and the fix is to tighten the bound
-towards 1 and delete this section, never to widen it.**
+| | |
+|---|---|
+| `mt_vib_set` | `MULU.W D0,D2` then `LSR.W #7,D2` |
+| `mt_tre_set` | `MULU.W D0,D2` then `LSR.W #6,D2` |
+
+One bit is exactly the factor of two. Wille's table-driven rewrite folds both
+effects onto the one precomputed table and normalises the asymmetry away, which
+makes it the better reading of *the algorithm* and the wrong authority for
+*ProTracker's behaviour*. The family reference records this as *"Tremolo is
+twice as deep as vibrato, and only ProTracker's own source says so"* in
+`protracker-playback-reference.md`.
+
+**What changed.** `effects.rs` divides the tremolo product by 64 and the vibrato
+product by 128, with the citation at the tremolo site so the next reader does not
+"fix" it back to match the rest of the engine's source. The harness now asserts
+*agreement* on depth within 2% — measured at +0.00%, both players reading 0.4688
+of the level — instead of asserting the 2.14x gap. The unit tests moved with it:
+`tremolo_swings_the_volume_around_the_stored_one` uses amplitude 7 so the swing
+keeps headroom and measures depth alone, and `tremolo_clamps_the_volume_at_both_ends`
+is new, because doubling the swing put `mt_Tremolo3`'s `0..=64` clamp within
+reach of a fixture where it never was before.
+
+**The lesson, since the method generalises.** Two independent implementations
+agreeing against a single source is a reason to go and find a better source.
+The harness recorded the gap as an assertion rather than tolerating it, which is
+what kept it findable until the source turned up.
 
 ### Not a difference: the vibrato rate
 

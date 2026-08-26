@@ -159,20 +159,37 @@ const SINE: [u8; 32] = [
     235, 224, 212, 197, 180, 161, 141, 120, 97, 74, 49, 24,
 ];
 
-/// The vibrato or tremolo offset for a waveform, position and amplitude.
+/// Vibrato's scale: `mt_Vibrato` multiplies by the amplitude and shifts the
+/// product right by 7 (`MULU.W D0,D2` / `LSR.W #7,D2`).
+const VIBRATO_SCALE: i32 = 128;
+
+/// Tremolo's scale: `mt_Tremolo` runs the identical multiply but shifts by 6,
+/// so `7xy` swings twice as far as `4xy` at the same amplitude. See the
+/// citation at the tremolo site.
+const TREMOLO_SCALE: i32 = 64;
+
+/// The vibrato or tremolo offset for a waveform, position and amplitude,
+/// divided by `scale` — 128 for vibrato, 64 for tremolo.
 ///
-/// The replayer reads a precomputed 1024-byte table per waveform, indexed at
-/// `64 * amplitude + (position & 63)`. All three tables are exactly reproduced
-/// by scaling a raw waveform value by `amplitude / 128` with the truncating
-/// division a 68000 `divs` does — verified against the replayer's own bytes,
-/// all 1,024 entries of all three tables, zero mismatches.
+/// The 2.3B replayer reads a precomputed 1024-byte table per waveform, indexed
+/// at `64 * amplitude + (position & 63)`. All three tables are exactly
+/// reproduced by scaling a raw waveform value by `amplitude / 128` with the
+/// truncating division a 68000 `divs` does — verified against the replayer's
+/// own bytes, all 1,024 entries of all three tables, zero mismatches. Those
+/// tables are vibrato's; tremolo shares them in that replayer but not in
+/// ProTracker itself, which is why the divisor is a parameter here.
+///
+/// ProTracker computes the magnitude unsigned (`MULU`, then `LSR`) and applies
+/// the sign afterwards from the position's top bit. `amplitude` is never
+/// negative and Rust's integer division truncates towards zero, so signing the
+/// raw value first is the same arithmetic.
 ///
 /// The sawtooth is *not* the sine's negate-the-second-half shape: it ramps up
 /// across `0..32`, jumps to its negative extreme at 32 and ramps up again, so
 /// it needs its own expression rather than a shared sign flip.
 /// (`mt_VibratoSineTable` 2645, `mt_VibratoSawTable` 2712,
 /// `mt_VibratoRectTable` 2778; selected by `n_vibratoctrl & 3` at line 2133.)
-fn waveform(ctrl: u8, position: u8, amplitude: u8) -> i32 {
+fn waveform(ctrl: u8, position: u8, amplitude: u8, scale: i32) -> i32 {
     let at = i32::from(position & 63);
     let quarter = (at & 31) as usize;
     let raw = match ctrl & 3 {
@@ -198,7 +215,7 @@ fn waveform(ctrl: u8, position: u8, amplitude: u8) -> i32 {
             }
         }
     };
-    raw * i32::from(amplitude) / 128
+    raw * i32::from(amplitude) / scale
 }
 
 /// The index of the first note whose untuned period is at or below `period`.
@@ -569,7 +586,7 @@ impl Seq<'_> {
     fn vibrato_nc(&mut self, channel: usize) {
         let rate = self.sample_rate;
         let voice = &mut self.state.voices[channel];
-        let delta = waveform(voice.vib_ctrl, voice.vib_pos, voice.vib_amp);
+        let delta = waveform(voice.vib_ctrl, voice.vib_pos, voice.vib_amp, VIBRATO_SCALE);
         let sounding = (i32::from(voice.period) + delta).max(1);
         voice.set_audper(sounding.min(i32::from(u16::MAX)) as u16, rate);
         // `add.b d4,n_vibratopos`: a byte, so it wraps at 256 rather than 64,
@@ -577,7 +594,31 @@ impl Seq<'_> {
         voice.vib_pos = voice.vib_pos.wrapping_add(voice.vib_speed);
     }
 
-    /// `mt_tremolo` (line 2172): vibrato's machinery applied to the volume.
+    /// `mt_tremolo` (line 2172): vibrato's machinery applied to the volume,
+    /// at twice vibrato's depth.
+    ///
+    /// **This is the one place the engine departs from the 2.3B replayer it
+    /// otherwise follows, and it is deliberate — do not "fix" it back.**
+    /// `protracker-23b-playroutine.asm` routes tremolo and vibrato through the
+    /// one precomputed table (line 2202, the same `mt_VibratoSineTable`
+    /// `mt_vibrato` reads at 2127), which normalises away an asymmetry
+    /// ProTracker actually has. ProTracker's own source keeps it:
+    /// `protracker-23f-replay-cia.s` — Olav Sørensen's disassembly and
+    /// re-source of ProTracker 2.3D, under `reference/by-topic/music-formats/`
+    /// — runs the identical multiply in both effects and shifts the product by
+    /// one bit less for tremolo:
+    ///
+    /// ```text
+    /// mt_vib_set:  MULU.W D0,D2 / LSR.W #7,D2
+    /// mt_tre_set:  MULU.W D0,D2 / LSR.W #6,D2
+    /// ```
+    ///
+    /// Wille's rewrite is the better reading of the *algorithm* and the wrong
+    /// authority for ProTracker's *behaviour*. libxmp 4.7.2 and libopenmpt
+    /// 0.8.9 both swing the doubled amount; the differential harness measured
+    /// us at half theirs before this shift was corrected. See
+    /// `protracker-playback-reference.md`, "Tremolo is twice as deep as
+    /// vibrato".
     fn tremolo(&mut self, channel: usize, param: u8) {
         let rate = self.sample_rate;
         let voice = &mut self.state.voices[channel];
@@ -587,10 +628,17 @@ impl Seq<'_> {
         if param >> 4 != 0 {
             voice.trem_speed = param >> 4;
         }
-        let delta = waveform(voice.trem_ctrl, voice.trem_pos, voice.trem_amp);
-        // The replayer does this in a byte and tests the sign; the offset can
-        // never exceed +/-29 (255 * 15 / 128), so a signed 16-bit clamp is the
-        // same arithmetic without the wrap.
+        let delta = waveform(
+            voice.trem_ctrl,
+            voice.trem_pos,
+            voice.trem_amp,
+            TREMOLO_SCALE,
+        );
+        // `mt_Tremolo3` clamps in a word: `BPL`/`CLR.W` at the bottom, then
+        // `CMP.W #64`/`MOVE.W #64` at the top. The offset can reach +/-59
+        // (255 * 15 / 64), so at amplitude 15 both ends are reachable from any
+        // stored volume — unlike vibrato's +/-29, which is why this clamp
+        // earns its own test rather than riding on the vibrato one.
         let level = (i32::from(voice.volume) + delta).clamp(0, i32::from(MAX_VOLUME));
         voice.play_volume = level as u8;
         // Tremolo re-asserts the period as well (line 2229), which matters on
