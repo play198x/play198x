@@ -1,0 +1,28 @@
+# play198x — the 198x family's retro media player/viewer.
+#
+# One published library crate today: `play198x-core`, which opens a retro media
+# file from any of three container shapes, identifies it from its bytes, and
+# yields either an RGBA image or a ProTracker module that plays. The shells
+# (GPUI and wasm-bindgen) are a later plan and are deliberately absent.
+[workspace]
+resolver = "3"
+members = ["crates/play198x-core"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.87"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/play198x/play198x"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+# `unwrap_used` and `expect_used` are denied because a panic reachable from a
+# container, probe or decode path is undefined behaviour once the FFI surface
+# arrives. Tests opt out with an inner
+# `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
+[workspace.lints.clippy]
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
