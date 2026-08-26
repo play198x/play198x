@@ -18,11 +18,26 @@ use crate::Error;
 /// for a high-density one. Everything else is smaller by an order of magnitude
 /// or more — a ProTracker module runs to a few hundred kilobytes, an ILBM to a
 /// few hundred more, a Spectrum screen to exactly 6,912. Sixteen mebibytes is
-/// a little over nine high-density disks: headroom for a PowerPacked file that
-/// expands, and for whatever format this crate grows next, while still refusing
-/// the four-gigabyte entry a hostile archive can declare for the price of four
-/// bytes of central directory.
+/// a little over nine high-density disks: headroom for whatever format this
+/// crate grows next, while still refusing the four-gigabyte entry a hostile
+/// archive can declare for the price of four bytes of central directory.
 const MAX_ENTRY_LEN: u64 = 16 * 1024 * 1024;
+
+/// The most `open` will load into memory for a whole container.
+///
+/// [`MAX_ENTRY_LEN`] bounds one entry; this bounds the archive that holds it,
+/// which is a separate allocation made earlier and on weaker evidence. Four
+/// bytes of `PK\x03\x04` at the front of an eight-gigabyte file are enough to
+/// reach the load, because the archive is only validated once its bytes are
+/// resident — so the size has to be refused before the read, not after it.
+///
+/// Derived the same way as the entry cap. The largest thing legitimately
+/// opened is a high-density Amiga disk image at 1,802,240 bytes, and the
+/// realistic upper end is a ZIP holding a disk's worth of modules. Sixty-four
+/// mebibytes is thirty-seven high-density disks, and four times
+/// [`MAX_ENTRY_LEN`], so an archive whose single entry sits right on the entry
+/// cap still opens even when stored uncompressed.
+const MAX_ARCHIVE_LEN: u64 = 64 * 1024 * 1024;
 
 /// How many bytes `open` looks at to tell one container shape from another.
 const SIGNATURE_LEN: usize = 4;
@@ -50,7 +65,15 @@ const MAX_DISK_ENTRIES: usize = 1_760;
 /// One readable thing inside a container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    /// The entry's name within the container, `/`-separated.
+    /// The entry's name, exactly as the container states it, and **not
+    /// sanitised**.
+    ///
+    /// A hostile archive can name an entry `../../../etc/passwd`, `/abs/root`,
+    /// `C:\win\evil`, or anything at all with a right-to-left override in it,
+    /// and all of those arrive here verbatim. Harmless within this crate — it
+    /// only ever reads, never joins this onto a directory and never writes —
+    /// but a caller that turns one of these into a filesystem path owns that
+    /// decision and must sanitise first.
     pub path: String,
     /// How many bytes reading it yields, before any decompression this crate
     /// does on the way out.
@@ -63,6 +86,10 @@ pub struct Entry {
 /// uniformity is the point — a plain file is a container of exactly one entry,
 /// named by the file's own basename, so nothing downstream has to ask where the
 /// bytes came from.
+///
+/// Noted, not fixed: `Clone` copies a whole resident archive, which is an
+/// expensive thing to do by accident. It stays derived because the shells will
+/// want it, and 64 MiB is the worst case either way.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Container {
@@ -92,15 +119,34 @@ impl Container {
         // paid on every thumbnail. Two cheap signals answer it: the first four
         // bytes, and the length — which an ADF is identified by, having no
         // magic number of its own.
-        let len = file.metadata()?.len();
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            // `/dev/zero` opens happily, reports a length of zero, and then
+            // hands back bytes for as long as anything asks. Every length
+            // signal below is a lie about a thing like that, so it is refused
+            // here rather than left for a read to discover — which, for
+            // `/dev/zero`, means never returning at all.
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("`{}` is not a regular file", path.display()),
+            )));
+        }
+        let len = metadata.len();
         let mut signature = Vec::with_capacity(SIGNATURE_LEN);
         file.by_ref()
             .take(SIGNATURE_LEN as u64)
             .read_to_end(&mut signature)?;
 
+        // Known gap, deliberately left: a self-extracting archive begins with
+        // an executable stub, so these four bytes send it down the plain-file
+        // path even though `zip::ZipArchive::new` would parse it — a ZIP is
+        // found from its tail, not its head. SFX `.exe` archives are common
+        // for this material. Catching them means a tail scan for
+        // `PK\x05\x06`, which is new capability rather than a fix, and
+        // belongs beside `probe`.
         if is_zip(&signature) {
             // Parse once and discard: this is the check, not the read.
-            let bytes = whole(&mut file)?;
+            let bytes = whole(&mut file, path, len)?;
             archive(&bytes)?;
             return Ok(Self::Zip(bytes));
         }
@@ -119,7 +165,7 @@ impl Container {
         if len == ADF_DD_LEN {
             // Validated here, like an archive, so a disk that turns out to
             // carry no filesystem is reported where the caller named the file.
-            let bytes = whole(&mut file)?;
+            let bytes = whole(&mut file, path, len)?;
             Disk::open(&bytes).map_err(from_adf)?;
             return Ok(Self::Adf(bytes));
         }
@@ -210,11 +256,15 @@ impl Container {
                 if entry != basename(path)? {
                     return Err(missing(entry));
                 }
-                let len = std::fs::metadata(path)?.len();
-                if len > MAX_ENTRY_LEN {
-                    return Err(too_large(entry, len));
-                }
-                Ok(std::fs::read(path)?)
+                // One handle for both the length and the bytes, and the read
+                // bounded as well as the length checked: `std::fs::read` would
+                // reserve whatever the metadata claimed and then read until
+                // the file stopped giving, which for anything that grows — or
+                // anything that turned into a device behind `open`'s back — is
+                // unbounded.
+                let mut file = std::fs::File::open(path)?;
+                let len = file.metadata()?.len();
+                bounded(&mut file, entry, len, MAX_ENTRY_LEN)
             }
             Self::Zip(bytes) => {
                 let mut archive = archive(bytes)?;
@@ -232,7 +282,7 @@ impl Container {
                 // direction and neither lie gets to allocate.
                 let declared = file.size();
                 if declared > MAX_ENTRY_LEN {
-                    return Err(too_large(entry, declared));
+                    return Err(too_large(entry, declared, MAX_ENTRY_LEN));
                 }
                 let mut out = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
                 file.by_ref()
@@ -243,7 +293,7 @@ impl Container {
                     })?;
                 let actual = out.len() as u64;
                 if actual > MAX_ENTRY_LEN {
-                    return Err(too_large(entry, actual));
+                    return Err(too_large(entry, actual, MAX_ENTRY_LEN));
                 }
                 Ok(out)
             }
@@ -271,7 +321,7 @@ impl Container {
                 }
                 let declared = u64::from(found.size);
                 if declared > MAX_ENTRY_LEN {
-                    return Err(too_large(entry, declared));
+                    return Err(too_large(entry, declared, MAX_ENTRY_LEN));
                 }
                 disk.read(entry).map_err(from_adf)
             }
@@ -298,12 +348,40 @@ fn decrunched(entry: &str, bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
     })
 }
 
-/// Read the rest of `file` from the start.
-fn whole(file: &mut std::fs::File) -> Result<Vec<u8>, Error> {
+/// Read the whole of `file` from the start, bounded by [`MAX_ARCHIVE_LEN`].
+fn whole(file: &mut std::fs::File, path: &Path, on_disk: u64) -> Result<Vec<u8>, Error> {
     file.seek(std::io::SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    bounded(file, &path.display().to_string(), on_disk, MAX_ARCHIVE_LEN)
+}
+
+/// Read `src` into a fresh buffer, refusing anything past `limit`.
+///
+/// `declared` is what the source says about itself. It is checked first, so an
+/// oversized thing is refused before a byte of it is reserved — the whole
+/// point, since a `Vec::with_capacity` of the declared size is exactly the
+/// allocation an attacker is asking for, and an allocation that fails aborts
+/// the process rather than unwinding.
+///
+/// Then the read itself is capped, because `declared` is not a fact: a file
+/// can grow between the metadata call and the read, and a non-regular one
+/// misreports its length outright. Refusing again on what actually arrived
+/// closes that race at the cost of one byte.
+fn bounded(
+    src: &mut impl std::io::Read,
+    name: &str,
+    declared: u64,
+    limit: u64,
+) -> Result<Vec<u8>, Error> {
+    if declared > limit {
+        return Err(too_large(name, declared, limit));
+    }
+    let mut out = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    src.take(limit + 1).read_to_end(&mut out)?;
+    let actual = out.len() as u64;
+    if actual > limit {
+        return Err(too_large(name, actual, limit));
+    }
+    Ok(out)
 }
 
 /// Map the ADF crate's errors onto this crate's, keeping the distinctions that
@@ -367,6 +445,12 @@ fn is_zip(bytes: &[u8]) -> bool {
     )
 }
 
+/// Parse the central directory of a resident archive.
+///
+/// Noted, not fixed: `open` parses to validate, `entries` parses again, and
+/// every `read` parses again — O(N²) for the obvious walk-and-read pattern.
+/// Fine for the handful of entries a music disk holds; revisit when `probe`
+/// starts iterating archives.
 fn archive(bytes: &[u8]) -> Result<zip::ZipArchive<std::io::Cursor<&[u8]>>, Error> {
     zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(damaged)
 }
@@ -385,11 +469,18 @@ fn missing(entry: &str) -> Error {
     }
 }
 
-fn too_large(entry: &str, len: u64) -> Error {
-    Error::Container {
-        what: format!(
-            "entry `{entry}` is {len} bytes, past the {MAX_ENTRY_LEN}-byte limit this crate will read"
-        ),
+/// Refuse something too big to read, as its own error rather than as damage.
+///
+/// `Error::Container` would be a lie here: a perfectly well-formed archive is
+/// allowed to hold an entry larger than this crate chooses to open, and saying
+/// "the container is damaged" sends the reader hunting damage that does not
+/// exist. `path` is the entry name inside a container, or the file's own path
+/// when it is the whole container being refused.
+fn too_large(path: &str, len: u64, limit: u64) -> Error {
+    Error::TooLarge {
+        path: path.to_owned(),
+        len,
+        limit,
     }
 }
 
@@ -399,4 +490,59 @@ fn basename(path: &Path) -> Result<&str, Error> {
         .ok_or_else(|| Error::Container {
             what: format!("`{}` has no usable file name", path.display()),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{Error, bounded};
+
+    /// `bounded` is unit-tested here rather than through a file because the
+    /// interesting case — a source that holds more than it declared — is a
+    /// race when it comes from the filesystem and cannot be staged reliably
+    /// from a test. A `Cursor` lies on demand.
+    #[test]
+    fn a_source_declaring_more_than_the_limit_is_refused_by_its_declaration() {
+        // Four bytes behind a claim of five thousand. Only the claim is
+        // oversized, and the claim is what has to stop it — before a buffer
+        // that size is reserved, since a failed allocation aborts rather than
+        // unwinds.
+        let mut src = std::io::Cursor::new(vec![0u8; 4]);
+        match bounded(&mut src, "claim.mod", 5_000, 100) {
+            Err(Error::TooLarge { path, len, limit }) => {
+                assert_eq!(path, "claim.mod");
+                assert_eq!(len, 5_000);
+                assert_eq!(limit, 100);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_source_holding_more_than_it_declared_stops_one_byte_past_the_limit() {
+        // Five hundred bytes behind a claim of ten: the declaration passes and
+        // the read is what has to refuse.
+        let mut src = std::io::Cursor::new(vec![7u8; 500]);
+        match bounded(&mut src, "liar.mod", 10, 100) {
+            Err(Error::TooLarge { path, len, limit }) => {
+                assert_eq!(path, "liar.mod");
+                assert_eq!(
+                    len, 101,
+                    "the read must stop one byte past the limit, not run to the end"
+                );
+                assert_eq!(limit, 100);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_source_exactly_on_the_limit_reads_back_whole() {
+        let mut src = std::io::Cursor::new(vec![3u8; 100]);
+        assert_eq!(
+            bounded(&mut src, "fine.mod", 100, 100).unwrap(),
+            vec![3u8; 100]
+        );
+    }
 }

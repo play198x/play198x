@@ -11,17 +11,39 @@ use play198x_core::container::Container;
 /// The length of a double-density Amiga floppy image: 1,760 blocks of 512.
 const DD: usize = 901_120;
 
-/// Write `bytes` to a uniquely-placed file called `name`, and give back its
-/// path. No fixture is ever read from the repository — every disk image below
-/// is built in the test that uses it.
-fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+/// A file in a temporary directory of its own, removed when the test that made
+/// it drops it. Four lines rather than a `tempfile` dependency; without it,
+/// every run left its disk images behind under `std::env::temp_dir()`.
+struct TempFile {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for TempFile {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Write `bytes` to a uniquely-placed file called `name`. No fixture is ever
+/// read from the repository — every disk image below is built in the test that
+/// uses it.
+fn write_temp(name: &str, bytes: &[u8]) -> TempFile {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("play198x-adf-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
-    path
+    TempFile { dir, path }
 }
 
 #[test]
@@ -107,7 +129,8 @@ fn a_disk_lists_its_files_by_full_path_and_reads_each_one_back() {
 #[test]
 fn a_directory_on_a_disk_is_neither_listed_nor_readable() {
     let img = format198x_commodore_amiga_adf::master(b"payload", "demo", "Music").unwrap();
-    let c = Container::open(&write_temp("dirs.adf", &img)).unwrap();
+    let file = write_temp("dirs.adf", &img);
+    let c = Container::open(&file).unwrap();
 
     let names: Vec<_> = c.entries().unwrap().into_iter().map(|e| e.path).collect();
     assert!(
@@ -124,7 +147,8 @@ fn a_directory_on_a_disk_is_neither_listed_nor_readable() {
 #[test]
 fn reading_a_path_the_disk_does_not_hold_names_it() {
     let img = format198x_commodore_amiga_adf::master(b"payload", "demo", "Music").unwrap();
-    let c = Container::open(&write_temp("named.adf", &img)).unwrap();
+    let file = write_temp("named.adf", &img);
+    let c = Container::open(&file).unwrap();
 
     match c.read("mods/nope.mod") {
         Err(Error::NoSuchEntry { path }) => assert_eq!(path, "mods/nope.mod"),
@@ -137,7 +161,8 @@ fn reading_a_path_the_disk_does_not_hold_names_it() {
 #[test]
 fn a_disk_image_named_anything_is_still_a_disk_image() {
     let img = format198x_commodore_amiga_adf::master(b"payload", "demo", "Music").unwrap();
-    let c = Container::open(&write_temp("collection.mod", &img)).unwrap();
+    let file = write_temp("collection.mod", &img);
+    let c = Container::open(&file).unwrap();
 
     assert_eq!(c.read("demo").unwrap(), b"payload");
 }
@@ -165,6 +190,7 @@ fn a_hostile_disk_image_never_panics() {
                     | Error::Io(_)
                     | Error::NoSuchEntry { .. }
                     | Error::NotAFilesystem
+                    | Error::TooLarge { .. }
                     | Error::UnsupportedContainer { .. },
                 ) => {}
                 Err(other) => panic!("unexpected error for byte {at}: {other:?}"),
@@ -185,12 +211,13 @@ fn a_disk_whose_directories_point_at_themselves_is_refused_rather_than_walked_fo
     // Point every hash slot of directory `a` back at `a` itself. Nothing in
     // the read path checksums a directory header, so this is a disk the ADF
     // crate opens and lists quite happily — and walking it never ends.
-    let block = find_directory_block(&img, "a");
+    let block = find_header_block(&img, "a", DIRECTORY);
     for slot in 0..72 {
         let at = block * 512 + 24 + 4 * slot;
         img[at..at + 4].copy_from_slice(&(block as u32).to_be_bytes());
     }
-    let c = Container::open(&write_temp("loop.adf", &img)).unwrap();
+    let file = write_temp("loop.adf", &img);
+    let c = Container::open(&file).unwrap();
 
     match c.entries() {
         Err(Error::Container { what }) => assert!(
@@ -201,14 +228,19 @@ fn a_disk_whose_directories_point_at_themselves_is_refused_rather_than_walked_fo
     }
 }
 
-/// The block number of the directory header named `name`. Directory headers
-/// carry block type 2 at offset 0 and secondary type 2 at the block's end, with
-/// the name length 80 bytes from that end.
-fn find_directory_block(img: &[u8], name: &str) -> usize {
+/// The secondary type at a header block's end: 2 for a directory, -3 for a
+/// file.
+const DIRECTORY: u32 = 2;
+const FILE: u32 = 0xFFFF_FFFD;
+
+/// The block number of the header named `name` and of kind `sec_type`. Header
+/// blocks carry block type 2 at offset 0 and their secondary type at the
+/// block's end, with the name length 80 bytes from that end.
+fn find_header_block(img: &[u8], name: &str, sec_type: u32) -> usize {
     let u32_at = |b: &[u8], at: usize| u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
     for block in 2..1760 {
         let b = &img[block * 512..][..512];
-        if u32_at(b, 0) != 2 || u32_at(b, 508) != 2 {
+        if u32_at(b, 0) != 2 || u32_at(b, 508) != sec_type {
             continue;
         }
         let len = usize::from(b[432]);
@@ -216,7 +248,56 @@ fn find_directory_block(img: &[u8], name: &str) -> usize {
             return block;
         }
     }
-    panic!("no directory named {name} on the image");
+    panic!("no header named {name} on the image");
+}
+
+/// Recompute an Amiga block's checksum, so a rewritten header is still a
+/// header the ADF crate will read rather than a damaged block.
+///
+/// The 128 big-endian words of a block sum to zero; the word at offset 20 is
+/// what makes up the difference.
+fn fix_checksum(img: &mut [u8], block: usize) {
+    let b = &mut img[block * 512..][..512];
+    b[20..24].copy_from_slice(&0u32.to_be_bytes());
+    let (words, _) = b.as_chunks::<4>();
+    let sum = words.iter().fold(0u32, |acc, word| {
+        acc.wrapping_add(u32::from_be_bytes(*word))
+    });
+    b[20..24].copy_from_slice(&sum.wrapping_neg().to_be_bytes());
+}
+
+#[test]
+fn a_disk_file_declaring_more_than_the_cap_is_refused_by_its_declaration() {
+    const CAP: u64 = 16 * 1024 * 1024;
+    const DECLARED: u32 = 16 * 1024 * 1024 + 4096;
+
+    let mut img = format198x_commodore_amiga_adf::master(b"payload", "demo", "Music").unwrap();
+    // A file header's byte-size field is four bytes the disk gets to state,
+    // and `Disk::read` reserves that much before reading a sector. An 880K
+    // disk plainly cannot hold sixteen mebibytes, which is the whole reason
+    // the claim is checked rather than allocated on trust.
+    let block = find_header_block(&img, "demo", FILE);
+    img[block * 512 + 324..][..4].copy_from_slice(&DECLARED.to_be_bytes());
+    fix_checksum(&mut img, block);
+    let file = write_temp("liar.adf", &img);
+
+    let c = Container::open(&file).unwrap();
+    let entries = c.entries().unwrap();
+    let demo = entries.iter().find(|e| e.path == "demo").unwrap();
+    assert_eq!(
+        demo.len,
+        u64::from(DECLARED),
+        "the disk has to be the one lying, or the test proves nothing"
+    );
+
+    match c.read("demo") {
+        Err(Error::TooLarge { path, len, limit }) => {
+            assert_eq!(path, "demo");
+            assert_eq!(len, u64::from(DECLARED));
+            assert_eq!(limit, CAP);
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,12 +404,13 @@ fn a_powerpacked_entry_reads_back_decrunched_from_every_container() {
     assert_ne!(packed, plain, "the fixture must actually be crunched");
 
     // Loose on the filesystem.
-    let loose = Container::open(&write_temp("tune.mod", &packed)).unwrap();
+    let loose_file = write_temp("tune.mod", &packed);
+    let loose = Container::open(&loose_file).unwrap();
     assert_eq!(loose.read("tune.mod").unwrap(), plain);
 
     // Inside a ZIP.
-    let zipped =
-        Container::open(&write_temp("tunes.zip", &build_zip("tune.mod", &packed))).unwrap();
+    let zip_file = write_temp("tunes.zip", &build_zip("tune.mod", &packed));
+    let zipped = Container::open(&zip_file).unwrap();
     assert_eq!(zipped.read("tune.mod").unwrap(), plain);
 
     // Inside a disk image, one directory down.
@@ -338,7 +420,8 @@ fn a_powerpacked_entry_reads_back_decrunched_from_every_container() {
     );
     volume.add_file("mods/tune.mod", &packed).unwrap();
     let img = volume.build().unwrap();
-    let disk = Container::open(&write_temp("tunes.adf", &img)).unwrap();
+    let disk_file = write_temp("tunes.adf", &img);
+    let disk = Container::open(&disk_file).unwrap();
     assert_eq!(disk.read("mods/tune.mod").unwrap(), plain);
 
     // The declared length stays the crunched one: it says what reading costs,
@@ -358,7 +441,8 @@ fn a_damaged_powerpacked_entry_is_a_typed_error_rather_than_a_panic() {
     // Keep the magic — so decrunching is still attempted — and ruin the
     // offset-width table behind it.
     packed[4..8].copy_from_slice(&[0, 0, 0, 0]);
-    let c = Container::open(&write_temp("broken.mod", &packed)).unwrap();
+    let file = write_temp("broken.mod", &packed);
+    let c = Container::open(&file).unwrap();
 
     match c.read("broken.mod") {
         Err(Error::Container { what }) => assert!(
@@ -378,7 +462,8 @@ fn a_powerpacked_entry_claiming_the_largest_output_the_format_allows_is_a_typed_
     // entry, not as a panic and not as sixteen megabytes of zeros.
     let at = packed.len() - 4;
     packed[at..at + 3].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
-    let c = Container::open(&write_temp("bomb.mod", &packed)).unwrap();
+    let file = write_temp("bomb.mod", &packed);
+    let c = Container::open(&file).unwrap();
 
     match c.read("bomb.mod") {
         Err(Error::Container { what }) => assert!(

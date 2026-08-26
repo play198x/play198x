@@ -7,6 +7,13 @@
 //! Nothing here panics on bad input, holds global state, or assumes a main
 //! thread: the crate is built for an FFI boundary and for thumbnailers running
 //! once per file inside somebody else's process.
+//!
+//! That covers what it allocates, which is the harder half of the promise. A
+//! container is bounded when it is opened and an entry when it is read,
+//! because an allocation large enough to fail aborts the process rather than
+//! unwinding — worse than a panic in exactly the setting this crate is built
+//! for, and precisely what a hostile file asks for when it declares a size
+//! nobody checks.
 
 pub mod container;
 pub mod decode;
@@ -33,6 +40,21 @@ pub enum Error {
     Decode { format: probe::Format, what: String },
     /// The container itself is malformed.
     Container { what: String },
+    /// The thing named is larger than this crate will read into memory. Not
+    /// damage: a well-formed archive can hold an entry bigger than we choose to
+    /// open, and a well-formed file can be bigger than we choose to load.
+    ///
+    /// Separate from [`Self::Container`] because a caller needs the two apart —
+    /// a thumbnailer skips an oversized entry and moves to the next one, but
+    /// reports a corrupt archive.
+    TooLarge {
+        /// The entry name, or the path, that was refused.
+        path: String,
+        /// How many bytes it is, or claims to be.
+        len: u64,
+        /// The limit it passed.
+        limit: u64,
+    },
     /// The disk has no DOS filesystem — a bootblock or non-DOS disk, which is
     /// a different thing from a damaged one.
     NotAFilesystem,
@@ -62,6 +84,12 @@ impl std::fmt::Display for Error {
                 write!(f, "the {format:?} decoder rejected the bytes: {what}")
             }
             Self::Container { what } => write!(f, "the container is damaged: {what}"),
+            // Deliberately not phrased as damage. The archive is fine; this
+            // crate simply will not read something this big into memory.
+            Self::TooLarge { path, len, limit } => write!(
+                f,
+                "`{path}` is {len} bytes, past the {limit}-byte limit this crate will read"
+            ),
             // Says what is true. A disk that boots from its bootblock simply
             // carries no DOS filesystem, so this must not read as damage.
             Self::NotAFilesystem => {
