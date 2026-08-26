@@ -16,7 +16,7 @@
 //!
 //! # Shape, and why it is this shape
 //!
-//! [`Engine::advance_tick`] is the single place the sequence moves, and the
+//! [`Seq::advance_tick`] is the single place the sequence moves, and the
 //! three effect dispatch tables in [`effects`] hang off its two branches:
 //! `fx_tab` on the tick that does not fetch a row, `prefx_tab` and
 //! `morefx_tab` on the one that does. Computing a module's duration walks the
@@ -31,6 +31,8 @@
 mod effects;
 
 use format198x_commodore_amiga_mod::{Module, Note, ROWS_PER_PATTERN};
+use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// PAL Paula's clock, in Hz. `rate = clock / (2 * period)`.
 ///
@@ -69,6 +71,41 @@ const VOICE_GAIN: f32 = 0.5;
 /// decoder does not clamp it, so the mixer does.
 const MAX_VOLUME: u8 = 64;
 
+/// Ticks [`Engine::timing`] will walk before giving up.
+///
+/// The visited-position set is what actually stops a looping module; this is
+/// the guarantee that a hostile one stops even if that set has a hole in it,
+/// so it is derived to sit well clear of anything legitimate rather than
+/// picked.
+///
+/// The longest *legitimate* module is a 128-order song at ProTracker's slowest
+/// settings. Every one of its `128 x 64 = 8192` rows can be held for `speed`
+/// ticks (at most 31, since `$20` is a tempo) and replayed by an `EEx` pattern
+/// delay up to 16 times:
+///
+/// ```text
+/// 8192 rows x 31 ticks x 16 delay rounds = 4_063_232 ticks
+/// ```
+///
+/// which at the slowest tempo of 32 — a tick of 78.125 ms — is 88 hours of
+/// music that no one has ever written. `E6x` pattern loops multiply that
+/// again, but a loop's repeats are bounded by its nibble and the visited set
+/// counts them as distinct positions, so they end by themselves.
+///
+/// Ten million ticks is a little over twice the arithmetic worst case, roughly
+/// forty times the longest module anybody has actually made, and costs under a
+/// second to walk. A real module reaches its end or its loop in a few thousand.
+const WALK_TICK_CAP: u32 = 10_000_000;
+
+/// Positions [`Engine::timing`] will remember.
+///
+/// `128 orders x 64 rows x 16 pattern-loop counts` — every position a module
+/// can legitimately reach and be expected to reach again. Past this the walk
+/// stops recording and leans on [`WALK_TICK_CAP`] instead, which bounds what a
+/// pathological file can make it allocate: the map holds 16 bytes an entry, so
+/// two megabytes at the very worst and a few kilobytes for real music.
+const VISIT_CAP: usize = 128 * ROWS_PER_PATTERN * 16;
+
 /// Where playback has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
@@ -82,6 +119,24 @@ pub struct Position {
     pub row: usize,
     /// Tick within the row, `0..speed`.
     pub tick: u8,
+}
+
+/// How long a module plays, and whether it comes back on itself.
+///
+/// Produced by [`Engine::timing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    /// One pass: from the top of the order table to whichever comes first —
+    /// the end of the song, an `F00` that stops it, or a position the song has
+    /// already played.
+    pub duration: Duration,
+    /// Whether the song returns to a position it has already played instead of
+    /// running off the end of its order table.
+    pub loops: bool,
+    /// How far into [`duration`](Self::duration) the repeated position was
+    /// first reached — the point playback comes back to. `None` when the song
+    /// does not loop.
+    pub loop_start: Option<Duration>,
 }
 
 /// One of the four voices.
@@ -275,10 +330,24 @@ pub struct Engine {
     /// Output frames per second. Clamped away from zero at construction so the
     /// tick arithmetic can never divide by it.
     sample_rate: f64,
+    /// Transport. The caller's business, not the song's, which is why it sits
+    /// here rather than in [`State`] — a duration walk has no opinion about
+    /// whether somebody has pressed pause.
+    playing: bool,
+    state: State,
+}
 
+/// Everything about the engine that moves as the song plays.
+///
+/// Split out from [`Engine`] so [`Engine::timing`] can run the sequencer over
+/// a fresh copy of it: `timing` takes `&self` and the walk needs somewhere
+/// mutable to move, and cloning the whole engine would copy every sample's PCM
+/// to walk a song that never reads a byte of it. `Copy` because it is voices
+/// and counters and nothing that owns memory.
+#[derive(Debug, Clone, Copy)]
+struct State {
     voices: [Voice; CHANNELS],
 
-    playing: bool,
     /// Ticks per row. A field rather than a constant because `Fxy` sets it.
     speed: u8,
     /// Beats per minute. Likewise.
@@ -304,21 +373,35 @@ pub struct Engine {
     patt_del_time: u8,
     /// `mt_PattDelTime2`: extra rounds of the current row still to play.
     patt_del_time2: u8,
+
+    /// `mt_SongEnd` (line 1438): the order index has run past the played
+    /// prefix and the song has restarted from the top. Playback carries on —
+    /// ProTracker only stops after 128 such passes — but it is where the
+    /// duration walk stops counting.
+    song_end: bool,
+    /// `mt_Enable` cleared: `F00` calls `_mt_end` (line 2347) and stops the
+    /// module dead. The replayer stores the zero speed *and then* stops, so
+    /// this is a separate flag rather than a speed of zero.
+    stopped: bool,
 }
 
-impl Engine {
-    /// Load `module` and start it at the top of the order table, playing.
-    ///
-    /// A `sample_rate` of zero is treated as 1 Hz. It is nonsense either way,
-    /// but this crate does not get to panic about it.
-    #[must_use]
-    pub fn new(module: Module, sample_rate: u32) -> Self {
-        let sample_rate = f64::from(sample_rate.max(1));
+/// The sequencer: a module and the state it moves through, borrowed together.
+///
+/// Playback and duration both run *this*. A second walk written beside the
+/// first is a walk that drifts from what you hear, and every position effect —
+/// `Bxx`, `Dxx`, `E6x`, `EEx`, `Fxy` — changes a module's length, so the two
+/// would drift on exactly the modules where the answer matters.
+struct Seq<'a> {
+    module: &'a Module,
+    sample_rate: f64,
+    state: &'a mut State,
+}
+
+impl State {
+    /// A module at its power-on defaults, on the first row of the first order.
+    const fn new() -> Self {
         Self {
-            module,
-            sample_rate,
             voices: [Voice::silent(); CHANNELS],
-            playing: true,
             speed: DEFAULT_SPEED,
             tempo: DEFAULT_TEMPO,
             frames_to_next_tick: 0.0,
@@ -331,6 +414,24 @@ impl Engine {
             posjump_flag: false,
             patt_del_time: 0,
             patt_del_time2: 0,
+            song_end: false,
+            stopped: false,
+        }
+    }
+}
+
+impl Engine {
+    /// Load `module` and start it at the top of the order table, playing.
+    ///
+    /// A `sample_rate` of zero is treated as 1 Hz. It is nonsense either way,
+    /// but this crate does not get to panic about it.
+    #[must_use]
+    pub fn new(module: Module, sample_rate: u32) -> Self {
+        Self {
+            module,
+            sample_rate: f64::from(sample_rate.max(1)),
+            playing: true,
+            state: State::new(),
         }
     }
 
@@ -341,17 +442,26 @@ impl Engine {
     /// counts, because an engine that allocates on the audio thread glitches
     /// on somebody else's machine and never on yours.
     pub fn render(&mut self, out: &mut [f32]) -> usize {
+        let playing = self.playing;
+        // Borrowed once, outside the loop: `module` shared and `state` mutable
+        // are disjoint fields, which the borrow checker only sees through a
+        // struct literal built here rather than through a method call.
+        let mut seq = Seq {
+            module: &self.module,
+            sample_rate: self.sample_rate,
+            state: &mut self.state,
+        };
         let mut frames = 0;
         // `as_chunks_mut` rather than `chunks_exact_mut(2)`: a stereo frame
         // is a fixed pair, and the typed form drops a bounds check per sample.
         for frame in out.as_chunks_mut::<2>().0 {
-            let (left, right) = if self.playing {
-                if self.frames_to_next_tick <= 0.0 {
-                    self.advance_tick();
-                    self.frames_to_next_tick += self.frames_per_tick();
+            let (left, right) = if playing && !seq.state.stopped {
+                if seq.state.frames_to_next_tick <= 0.0 {
+                    seq.advance_tick();
+                    seq.state.frames_to_next_tick += seq.frames_per_tick();
                 }
-                let mixed = self.mix_frame();
-                self.frames_to_next_tick -= 1.0;
+                let mixed = seq.mix_frame();
+                seq.state.frames_to_next_tick -= 1.0;
                 mixed
             } else {
                 (0.0, 0.0)
@@ -367,10 +477,10 @@ impl Engine {
     #[must_use]
     pub fn position(&self) -> Position {
         Position {
-            order: self.order,
-            pattern: self.current_pattern(),
-            row: self.row,
-            tick: self.tick,
+            order: self.state.order,
+            pattern: pattern_at(&self.module, self.state.order),
+            row: self.state.row,
+            tick: self.state.tick,
         }
     }
 
@@ -390,17 +500,14 @@ impl Engine {
         if orders == 0 {
             return;
         }
-        self.order = order_index.min(orders - 1);
-        self.row = 0;
-        self.tick = 0;
-        self.row_pending = true;
-        self.frames_to_next_tick = 0.0;
-        self.voices = [Voice::silent(); CHANNELS];
-        self.pbreak_row = 0;
-        self.pbreak_flag = false;
-        self.posjump_flag = false;
-        self.patt_del_time = 0;
-        self.patt_del_time2 = 0;
+        // Speed and tempo survive a seek: they are where the song left them,
+        // and the scrub bar is not a power cycle.
+        let speed = self.state.speed;
+        let tempo = self.state.tempo;
+        self.state = State::new();
+        self.state.speed = speed;
+        self.state.tempo = tempo;
+        self.state.order = order_index.min(orders - 1);
     }
 
     /// A channel's stored volume, `0..=64`.
@@ -412,7 +519,10 @@ impl Engine {
     #[doc(hidden)]
     #[must_use]
     pub fn debug_channel_volume(&self, channel: usize) -> u8 {
-        self.voices.get(channel).map_or(0, |voice| voice.volume)
+        self.state
+            .voices
+            .get(channel)
+            .map_or(0, |voice| voice.volume)
     }
 
     /// The period a channel is *sounding* at — Paula's `AUDPER`, not the
@@ -420,72 +530,193 @@ impl Engine {
     #[doc(hidden)]
     #[must_use]
     pub fn debug_channel_period(&self, channel: usize) -> u16 {
-        self.voices
+        self.state
+            .voices
             .get(channel)
             .map_or(0, |voice| voice.play_period)
     }
 
-    /// Output frames in one tick: `sample_rate * (2500 / tempo) / 1000`.
+    /// How long the module plays, and whether it comes back on itself.
+    ///
+    /// Walks the song silently from the top — the same `advance_tick` playback
+    /// runs, with the mixer switched off — because `Bxx`, `Dxx`, `E6x`, `EEx`
+    /// and `Fxy` all change how long a module lasts. Rows times speed times
+    /// tick length is the wrong answer for any module that uses one of them,
+    /// which is most of them.
+    ///
+    /// Takes `&self` and disturbs nothing: the walk moves its own fresh
+    /// sequencer state and only reads the module, so calling it mid-playback
+    /// cannot alter what you are hearing. Unlike [`Engine::render`] it *does*
+    /// allocate — a map of the positions it has visited, bounded to a couple
+    /// of megabytes even for a hostile file — so it belongs anywhere except
+    /// the audio callback.
+    #[must_use]
+    pub fn timing(&self) -> Timing {
+        let mut state = State::new();
+        let mut seq = Seq {
+            module: &self.module,
+            sample_rate: self.sample_rate,
+            state: &mut state,
+        };
+
+        // A `BTreeMap` rather than a `HashMap`: no random seed, no thread-local
+        // hasher state, and the same answer on every machine and every run,
+        // which matters for a number that ends up in a file's metadata.
+        let mut visited: BTreeMap<u64, f64> = BTreeMap::new();
+        let mut elapsed_ms = 0.0_f64;
+        let mut loops = false;
+        let mut loop_start_ms = None;
+
+        for _ in 0..WALK_TICK_CAP {
+            if seq.module.orders().is_empty() {
+                break;
+            }
+            let fetched = seq.advance_tick();
+
+            // The song ran off the end of its order table and restarted from
+            // the top. That is where a module's length stops being measured:
+            // the tick just taken belongs to the second pass, so it is not
+            // counted.
+            if seq.state.song_end {
+                break;
+            }
+            // `F00` stopped the module dead (`_mt_end`). Everything from here
+            // is silence, and the tick that stopped it produced silence too.
+            if seq.state.stopped {
+                break;
+            }
+
+            if let Some(key) = fetched {
+                if let Some(first) = visited.get(&key) {
+                    loops = true;
+                    loop_start_ms = Some(*first);
+                    break;
+                }
+                if visited.len() < VISIT_CAP {
+                    visited.insert(key, elapsed_ms);
+                }
+            }
+
+            elapsed_ms += seq.tick_ms();
+        }
+
+        Timing {
+            duration: millis(elapsed_ms),
+            loops,
+            loop_start: loop_start_ms.map(millis),
+        }
+    }
+}
+
+impl Seq<'_> {
+    /// One tick's length in milliseconds: `2500 / tempo`.
+    ///
+    /// PAL's CIA timer is loaded with `1773447 / tempo` and counts at 709379
+    /// Hz, so the interrupt rate is `tempo * 0.4` and the tick is `2.5 / tempo`
+    /// seconds — 20 ms at the default 125. (`mt_setspeed` line 2353 for the
+    /// division, line 344 for the PAL constant.)
+    fn tick_ms(&self) -> f64 {
+        // `max(1)` because `Fxy` can name a tempo of zero, and dividing by it
+        // would produce an infinite tick rather than a refused one.
+        TICK_MS_NUMERATOR / f64::from(self.state.tempo.max(1))
+    }
+
+    /// Output frames in one tick.
     ///
     /// Recomputed each tick rather than cached, so that `Fxy` setting the
     /// tempo cannot leave a stale figure behind. One division per 20 ms is not
     /// a cost worth a cache-invalidation bug.
     fn frames_per_tick(&self) -> f64 {
-        // `max(1)` because `Fxy` can name a tempo of zero, and dividing by it
-        // would produce an infinite tick rather than a refused one.
-        self.sample_rate * TICK_MS_NUMERATOR / f64::from(self.tempo.max(1)) / 1_000.0
+        self.sample_rate * self.tick_ms() / 1_000.0
     }
 
     /// The pattern the current order names, or 0 when there is no order to
     /// read — a `song_length` of zero, which is a module with nothing to play.
     fn current_pattern(&self) -> usize {
-        self.module
-            .orders()
-            .get(self.order)
-            .map_or(0, |pattern| usize::from(*pattern))
+        pattern_at(self.module, self.state.order)
     }
 
-    /// Move the sequence on by one tick.
+    /// The position the duration walk records as visited.
+    ///
+    /// Order and row, **and the four channels' `E6x` repeat counters**. A
+    /// pattern loop is *supposed* to bring the song back to a row it has
+    /// already played, a bounded number of times, so a bare `(order, row)`
+    /// reports every legitimate `E63` as a song loop and truncates the
+    /// duration to the first repeat. The counter is what makes those arrivals
+    /// distinct: they run 3, 2, 1 on the way through the loop and are back at
+    /// 0 by the time the song could genuinely return. `mt_jumploop` only ever
+    /// stores a nibble, so each counter is `0..=15` and 45 bits hold the lot.
+    ///
+    /// Read **before** the row's own effects run, which is why
+    /// [`Self::advance_tick`] returns it rather than the walk asking for it
+    /// afterwards: `mt_posjump` writes the new order the moment `Bxx` acts, so
+    /// a key taken after the fact says where the song is *going* rather than
+    /// where it just was. A `B01` on order 2 read as order 0, collided with
+    /// order 0's own row, and cut a three-order song a row short.
+    fn visit_key(&self) -> u64 {
+        let mut key = ((self.state.order as u64) & 0x7F) << 6 | (self.state.row as u64 & 0x3F);
+        for voice in &self.state.voices {
+            key = (key << 8) | u64::from(voice.loop_count as u8);
+        }
+        key
+    }
+
+    /// Move the sequence on by one tick, reporting the position it fetched.
     ///
     /// The one place playback advances, and the place the three effect tables
-    /// hang off. Duration measurement walks this with the mixer switched off
-    /// rather than reimplementing it.
-    fn advance_tick(&mut self) {
+    /// hang off. [`Engine::timing`] walks this with the mixer switched off
+    /// rather than reimplementing it, and the returned [`Self::visit_key`] is
+    /// what tells it a new position has been reached: `None` for a tick that
+    /// does not fetch a row, because a pattern delay's extra rounds replay a
+    /// row without revisiting it.
+    fn advance_tick(&mut self) -> Option<u64> {
         if self.module.orders().is_empty() {
-            return;
+            return None;
         }
 
-        if self.row_pending {
-            self.row_pending = false;
-            self.tick = 0;
-            self.start_row();
-            return;
+        if self.state.row_pending {
+            self.state.row_pending = false;
+            self.state.tick = 0;
+            return Some(self.fetch_row());
         }
 
-        self.tick += 1;
-        // `max(1)` because `F00` can set the speed to zero, and a row of zero
-        // ticks would otherwise stall the comparison rather than the song.
-        if self.tick < self.speed.max(1) {
+        self.state.tick += 1;
+        // `max(1)` because `F00` sets the speed to zero on its way to stopping
+        // the song, and a row of zero ticks would otherwise stall the
+        // comparison rather than the song.
+        if self.state.tick < self.state.speed.max(1) {
             // An ordinary tick: `fx_tab` only. This branch is why a per-tick
             // effect runs `speed - 1` times a row.
             self.run_fx();
-            return;
+            return None;
         }
 
-        self.tick = 0;
+        self.state.tick = 0;
         // The replayer steps the pattern at the *end* of a note tick
         // (`pattern_step`, line 1387). Doing it here instead, at the start of
         // the next one, consumes the same flags in the same order and keeps
         // `position` naming the row that is sounding rather than the one
         // queued behind it.
         self.pattern_step();
-        if self.patt_del_time2 == 0 {
-            self.start_row();
+        if self.state.patt_del_time2 == 0 {
+            Some(self.fetch_row())
         } else {
             // A pattern delay's extra round does not re-fetch the row, so no
             // note retriggers and only `fx_tab` runs — on the note tick too.
             self.run_fx();
+            None
         }
+    }
+
+    /// Note the position, then play the row that is at it.
+    ///
+    /// The order matters and is the whole reason this is a function: `Bxx`
+    /// moves the order index while the row it sits on is being played, so the
+    /// position has to be taken first or it names the destination.
+    fn fetch_row(&mut self) -> u64 {
+        let key = self.visit_key();
+        self.start_row();
+        key
     }
 
     /// `pattern_step` (line 1387): decide which row plays next.
@@ -495,26 +726,26 @@ impl Engine {
     /// just played left behind.
     fn pattern_step(&mut self) {
         let mut advance = true;
-        let mut delay = self.patt_del_time2;
-        if self.patt_del_time != 0 {
-            delay = self.patt_del_time;
-            self.patt_del_time = 0;
+        let mut delay = self.state.patt_del_time2;
+        if self.state.patt_del_time != 0 {
+            delay = self.state.patt_del_time;
+            self.state.patt_del_time = 0;
         }
         if delay != 0 {
             delay -= 1;
             if delay != 0 {
                 advance = false;
             }
-            self.patt_del_time2 = delay;
+            self.state.patt_del_time2 = delay;
         }
 
-        self.row += usize::from(advance);
-        if self.pbreak_flag {
-            self.pbreak_flag = false;
-            self.row = self.pbreak_row;
-            self.pbreak_row = 0;
+        self.state.row += usize::from(advance);
+        if self.state.pbreak_flag {
+            self.state.pbreak_flag = false;
+            self.state.row = self.state.pbreak_row;
+            self.state.pbreak_row = 0;
         }
-        if self.row >= ROWS_PER_PATTERN || self.posjump_flag {
+        if self.state.row >= ROWS_PER_PATTERN || self.state.posjump_flag {
             self.song_step();
         }
     }
@@ -525,14 +756,21 @@ impl Engine {
     /// module's restart byte, which is a Noisetracker leftover that real files
     /// routinely leave at 127.
     fn song_step(&mut self) {
-        self.row = self.pbreak_row;
-        self.pbreak_row = 0;
-        self.posjump_flag = false;
+        self.state.row = self.state.pbreak_row;
+        self.state.pbreak_row = 0;
+        self.state.posjump_flag = false;
         // `and.w #$007f`: the order is a 7-bit field, so it wraps rather than
         // running off the 128-entry table.
-        self.order = (self.order + 1) & 0x7F;
-        if self.order >= self.module.orders().len() {
-            self.order = 0;
+        self.state.order = (self.state.order + 1) & 0x7F;
+        if self.state.order >= self.module.orders().len() {
+            self.state.order = 0;
+            // `addq.b #1,mt_SongEnd` (line 1438). The replayer counts passes
+            // and keeps playing; this crate keeps playing too, and only the
+            // duration walk reads the flag. A `B00` that jumps to order 0
+            // does *not* set it — the increment lands inside the played
+            // prefix — which is what separates a song that ends from a song
+            // that loops.
+            self.state.song_end = true;
         }
     }
 
@@ -551,7 +789,7 @@ impl Engine {
             .module
             .patterns
             .get(pattern)
-            .and_then(|pattern| pattern.get(self.row))
+            .and_then(|pattern| pattern.get(self.state.row))
             .copied()
             .unwrap_or_default();
 
@@ -564,7 +802,7 @@ impl Engine {
     fn mix_frame(&mut self) -> (f32, f32) {
         let mut left = 0.0;
         let mut right = 0.0;
-        for (index, voice) in self.voices.iter_mut().enumerate() {
+        for (index, voice) in self.state.voices.iter_mut().enumerate() {
             let value = match voice.sample {
                 Some(slot) => match self.module.samples.get(slot) {
                     Some(sample) => voice.next_sample(&sample.data),
@@ -578,4 +816,24 @@ impl Engine {
         }
         (left * VOICE_GAIN, right * VOICE_GAIN)
     }
+}
+
+/// The pattern an order names, or 0 when there is no such order — a
+/// `song_length` of zero, which is a module with nothing to play.
+fn pattern_at(module: &Module, order: usize) -> usize {
+    module
+        .orders()
+        .get(order)
+        .map_or(0, |pattern| usize::from(*pattern))
+}
+
+/// Milliseconds as a [`Duration`], without a panic path.
+///
+/// `Duration::from_secs_f64` panics on a negative or non-finite value.
+/// Nothing here can produce one — a tick is `2500 / tempo` with the tempo
+/// floored at 1, and the walk takes at most [`WALK_TICK_CAP`] of them — but
+/// this crate sits behind an FFI boundary, so the arithmetic that "cannot"
+/// overflow is still not allowed to unwind if it does.
+fn millis(ms: f64) -> Duration {
+    Duration::try_from_secs_f64(ms / 1_000.0).unwrap_or(Duration::ZERO)
 }

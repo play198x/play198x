@@ -24,7 +24,7 @@
 //! disagrees — it does, about the vibrato rate, by 20% — the replayer wins.
 //! See `reference/by-topic/music-formats/protracker-playback-reference.md`.
 
-use super::{CHANNELS, Engine, MAX_VOLUME, ROWS_PER_PATTERN, Voice};
+use super::{CHANNELS, MAX_VOLUME, ROWS_PER_PATTERN, Seq, Voice};
 
 /// The number of notes ProTracker's period tables hold, C-1 to B-3.
 pub(super) const NOTES: usize = 36;
@@ -215,7 +215,7 @@ fn nearest_note(table: &[u16; NOTES], period: u16) -> usize {
     NOTES - 1
 }
 
-impl Engine {
+impl Seq<'_> {
     /// `mt_playvoice` (line 1637): act on one channel's cell at the note tick.
     ///
     /// The sample number is taken first and acts whether or not there is a
@@ -224,7 +224,7 @@ impl Engine {
     pub(super) fn play_voice(&mut self, channel: usize, note: super::Note) {
         let rate = self.sample_rate;
         {
-            let voice = &mut self.voices[channel];
+            let voice = &mut self.state.voices[channel];
             // `tst.l (a2)` at line 1667: an entirely empty previous cell means
             // nothing has written AUDPER since, so the stored period is
             // re-asserted. This is what ends an arpeggio or a vibrato.
@@ -240,7 +240,7 @@ impl Engine {
         }
 
         if note.sample != 0 {
-            select_sample(&mut self.voices[channel], note.sample, &self.module);
+            select_sample(&mut self.state.voices[channel], note.sample, self.module);
         }
 
         // No note: straight to `morefx_tab` (`tst.w d6 / beq checkmorefx`,
@@ -250,13 +250,16 @@ impl Engine {
             return;
         }
 
-        let (effect, param) = (self.voices[channel].effect, self.voices[channel].param);
+        let (effect, param) = (
+            self.state.voices[channel].effect,
+            self.state.voices[channel].param,
+        );
 
         // `E5x` set finetune is checked ahead of the table (line 1792): it
         // changes which period table the note is looked up in, so it cannot
         // wait until `morefx_tab`.
         if effect == 0x0E && param >> 4 == 0x05 {
-            self.voices[channel].finetune = usize::from(param & 0x0F);
+            self.state.voices[channel].finetune = usize::from(param & 0x0F);
             self.set_period(channel, note.period);
             return;
         }
@@ -288,7 +291,7 @@ impl Engine {
     fn set_period(&mut self, channel: usize, note_period: u16) {
         let rate = self.sample_rate;
         {
-            let voice = &mut self.voices[channel];
+            let voice = &mut self.state.voices[channel];
             let index = nearest_note(&PERIOD_TABLE[0], note_period);
             voice.note_index = index;
             voice.period = PERIOD_TABLE[voice.finetune][index];
@@ -313,7 +316,7 @@ impl Engine {
     /// `set_toneporta` (line 1919): aim the slide at the row's note instead of
     /// playing it.
     fn set_toneporta(&mut self, channel: usize, note_period: u16) {
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let table = &PERIOD_TABLE[voice.finetune];
         let mut index = nearest_note(table, note_period);
         // A negative finetune's table is shifted a semitone, so the search
@@ -330,7 +333,10 @@ impl Engine {
     /// `morefx_tab` (line 1899): the note tick's second dispatch, and the only
     /// dispatch on a row with no new note.
     pub(super) fn morefx(&mut self, channel: usize) {
-        let (effect, param) = (self.voices[channel].effect, self.voices[channel].param);
+        let (effect, param) = (
+            self.state.voices[channel].effect,
+            self.state.voices[channel].param,
+        );
         match effect {
             0x09 => self.sample_offset(channel),
             0x0B => self.position_jump(param),
@@ -345,7 +351,10 @@ impl Engine {
 
     /// `fx_tab` (line 1609): every tick that does not fetch a row.
     pub(super) fn fx(&mut self, channel: usize) {
-        let (effect, param) = (self.voices[channel].effect, self.voices[channel].param);
+        let (effect, param) = (
+            self.state.voices[channel].effect,
+            self.state.voices[channel].param,
+        );
         // `d4 = n_cmd & $0fff / beq mt_pernop` (line 1597): effect 0 with a
         // zero parameter is not an arpeggio, it is nothing at all.
         if effect == 0 && param == 0 {
@@ -379,9 +388,9 @@ impl Engine {
     /// the sub-effects that act once a row test the tick counter themselves,
     /// exactly as the replayer does.
     fn e_command(&mut self, channel: usize) {
-        let param = self.voices[channel].param;
+        let param = self.state.voices[channel].param;
         let x = param & 0x0F;
-        let note_tick = self.tick == 0;
+        let note_tick = self.state.tick == 0;
         match param >> 4 {
             // `E0x` toggles the Amiga's LED low-pass filter. Nothing here
             // models that filter, so nothing here can honour it; silently
@@ -397,11 +406,11 @@ impl Engine {
                     self.do_porta_down(channel, u16::from(x));
                 }
             }
-            0x3 => self.voices[channel].glissando = x != 0,
-            0x4 => self.voices[channel].vib_ctrl = x,
-            0x5 => self.voices[channel].finetune = usize::from(x),
+            0x3 => self.state.voices[channel].glissando = x != 0,
+            0x4 => self.state.voices[channel].vib_ctrl = x,
+            0x5 => self.state.voices[channel].finetune = usize::from(x),
             0x6 => self.pattern_loop(channel, x),
-            0x7 => self.voices[channel].trem_ctrl = x,
+            0x7 => self.state.voices[channel].trem_ctrl = x,
             // `E8x` stores a value for a host program to read back. There is
             // no host program here, and it makes no sound.
             0x8 => {}
@@ -431,7 +440,7 @@ impl Engine {
     /// `mt_pernop` (line 1628): write the stored period to AUDPER.
     fn per_nop(&mut self, channel: usize) {
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let period = voice.period;
         voice.set_audper(period, rate);
     }
@@ -442,7 +451,7 @@ impl Engine {
     /// exactly `tick mod 3` — and the tick can never reach 32, because `Fxy`
     /// only sets a speed below `$20`.
     fn arpeggio(&mut self, channel: usize, param: u8) {
-        let semitones = match self.tick % 3 {
+        let semitones = match self.state.tick % 3 {
             0 => {
                 self.per_nop(channel);
                 return;
@@ -451,7 +460,7 @@ impl Engine {
             _ => usize::from(param & 0x0F),
         };
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let index = voice.note_index + semitones;
         // Past the top of the table the replayer returns without writing
         // AUDPER at all, leaving whatever the last write put there.
@@ -469,7 +478,7 @@ impl Engine {
     /// `do_porta_up` (line 2009), shared with `E1x` fine portamento.
     fn do_porta_up(&mut self, channel: usize, amount: u16) {
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let period = (i32::from(voice.period) - i32::from(amount)).max(MIN_PERIOD);
         voice.period = period as u16;
         voice.set_audper(period as u16, rate);
@@ -483,7 +492,7 @@ impl Engine {
     /// `do_porta_down` (line 2036), shared with `E2x` fine portamento.
     fn do_porta_down(&mut self, channel: usize, amount: u16) {
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let period = (i32::from(voice.period) + i32::from(amount)).min(MAX_PERIOD);
         voice.period = period as u16;
         voice.set_audper(period as u16, rate);
@@ -492,10 +501,10 @@ impl Engine {
     /// `mt_toneporta` (line 2048): a non-zero parameter sets the speed.
     fn tone_porta(&mut self, channel: usize, param: u8) {
         if param != 0 {
-            self.voices[channel].tone_speed = param;
+            self.state.voices[channel].tone_speed = param;
             // `move.b d7,n_cmdlo`: the replayer clears the parameter so the
             // rest of the row cannot set the speed twice.
-            self.voices[channel].param = 0;
+            self.state.voices[channel].param = 0;
         }
         self.tone_porta_nc(channel);
     }
@@ -503,7 +512,7 @@ impl Engine {
     /// `mt_toneporta_nc` (line 2053): one step towards the target.
     fn tone_porta_nc(&mut self, channel: usize) {
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let target = i32::from(voice.wanted_period);
         if target == 0 {
             return;
@@ -543,7 +552,7 @@ impl Engine {
     /// the next row continue the sweep.
     fn vibrato(&mut self, channel: usize, param: u8) {
         {
-            let voice = &mut self.voices[channel];
+            let voice = &mut self.state.voices[channel];
             if param & 0x0F != 0 {
                 voice.vib_amp = param & 0x0F;
             }
@@ -559,7 +568,7 @@ impl Engine {
     /// integrates the sweep and the note sails away instead of wobbling.
     fn vibrato_nc(&mut self, channel: usize) {
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let delta = waveform(voice.vib_ctrl, voice.vib_pos, voice.vib_amp);
         let sounding = (i32::from(voice.period) + delta).max(1);
         voice.set_audper(sounding.min(i32::from(u16::MAX)) as u16, rate);
@@ -571,7 +580,7 @@ impl Engine {
     /// `mt_tremolo` (line 2172): vibrato's machinery applied to the volume.
     fn tremolo(&mut self, channel: usize, param: u8) {
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         if param & 0x0F != 0 {
             voice.trem_amp = param & 0x0F;
         }
@@ -594,7 +603,7 @@ impl Engine {
     /// `mt_volumeslide` (line 2246): up by the high nibble, else down by the
     /// low one. A non-zero high nibble wins; `A11` slides up.
     fn volume_slide(&mut self, channel: usize, param: u8) {
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let level = if param >> 4 != 0 {
             i32::from(voice.volume) + i32::from(param >> 4)
         } else {
@@ -607,7 +616,7 @@ impl Engine {
 
     /// `mt_volfineup` (line 2537): `EAx`, once per row.
     fn fine_volume_up(&mut self, channel: usize, amount: u8) {
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let level = (i32::from(voice.volume) + i32::from(amount)).min(i32::from(MAX_VOLUME)) as u8;
         voice.volume = level;
         voice.play_volume = level;
@@ -615,7 +624,7 @@ impl Engine {
 
     /// `mt_volfinedn` (line 2549): `EBx`, once per row.
     fn fine_volume_down(&mut self, channel: usize, amount: u8) {
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let level = (i32::from(voice.volume) - i32::from(amount)).max(0) as u8;
         voice.volume = level;
         voice.play_volume = level;
@@ -623,7 +632,7 @@ impl Engine {
 
     /// `mt_volchange` (line 2295): `Cxy`, clamped to full volume.
     fn set_volume(&mut self, channel: usize, param: u8) {
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let level = param.min(MAX_VOLUME);
         voice.volume = level;
         voice.play_volume = level;
@@ -635,7 +644,7 @@ impl Engine {
     /// what makes `900` useful rather than a no-op. An offset past the end
     /// leaves one word to play rather than reading off the end of the sample.
     fn sample_offset(&mut self, channel: usize) {
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         let param = if voice.param == 0 {
             voice.sample_offset
         } else {
@@ -656,8 +665,8 @@ impl Engine {
         if count == 0 {
             return;
         }
-        let voice = &mut self.voices[channel];
-        if self.tick == 0 {
+        let voice = &mut self.state.voices[channel];
+        if self.state.tick == 0 {
             voice.retrig_count = count;
             // A row that carries a note has already triggered it; retriggering
             // again on the same tick would double it.
@@ -676,21 +685,21 @@ impl Engine {
 
     /// `mt_notecut` (line 2561): `ECx` zeroes the volume on tick `x`.
     fn note_cut(&mut self, channel: usize, at: u8) {
-        if at != self.tick {
+        if at != self.state.tick {
             return;
         }
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         voice.volume = 0;
         voice.play_volume = 0;
     }
 
     /// `mt_notedelay` (line 2572): `EDx` starts the row's note on tick `x`.
     fn note_delay(&mut self, channel: usize, at: u8) {
-        if at != self.tick {
+        if at != self.state.tick {
             return;
         }
         let rate = self.sample_rate;
-        let voice = &mut self.voices[channel];
+        let voice = &mut self.state.voices[channel];
         // Only a row that actually carries a note is delayed; `ED2` alone
         // retriggers nothing.
         if voice.note_period == 0 {
@@ -706,20 +715,20 @@ impl Engine {
     /// The extra rounds do not re-fetch the row, so nothing retriggers; only
     /// `fx_tab` runs, and it runs on the note tick too.
     fn pattern_delay(&mut self, count: u8) {
-        if self.tick != 0 || self.patt_del_time2 != 0 {
+        if self.state.tick != 0 || self.state.patt_del_time2 != 0 {
             return;
         }
-        self.patt_del_time = count.saturating_add(1);
+        self.state.patt_del_time = count.saturating_add(1);
     }
 
     /// `mt_jumploop` (line 2478): `E60` marks a loop start, `E6x` repeats back
     /// to it `x` times.
     fn pattern_loop(&mut self, channel: usize, count: u8) {
-        if self.tick != 0 {
+        if self.state.tick != 0 {
             return;
         }
-        let row = self.row;
-        let voice = &mut self.voices[channel];
+        let row = self.state.row;
+        let voice = &mut self.state.voices[channel];
         if count == 0 {
             voice.loop_row = row;
             return;
@@ -736,8 +745,8 @@ impl Engine {
         } else {
             remaining
         };
-        self.pbreak_row = self.voices[channel].loop_row;
-        self.pbreak_flag = true;
+        self.state.pbreak_row = self.state.voices[channel].loop_row;
+        self.state.pbreak_flag = true;
     }
 
     /// `mt_posjump` (line 2280): `Bxy` continues at order `xy`.
@@ -745,9 +754,9 @@ impl Engine {
     /// The replayer sets the position to `xy - 1` and lets the ordinary
     /// end-of-row step add one back, which is why `B00` restarts the song.
     fn position_jump(&mut self, param: u8) {
-        self.order = usize::from(param.wrapping_sub(1) & 0x7F);
-        self.pbreak_row = 0;
-        self.posjump_flag = true;
+        self.state.order = usize::from(param.wrapping_sub(1) & 0x7F);
+        self.state.pbreak_row = 0;
+        self.state.posjump_flag = true;
     }
 
     /// `mt_patternbrk` (line 2311): `Dxy` continues at row `xy` — read as
@@ -755,17 +764,32 @@ impl Engine {
     fn pattern_break(&mut self, param: u8) {
         let tens = usize::from(param >> 4);
         let row = if tens < 10 { tens * 10 } else { 0 } + usize::from(param & 0x0F);
-        self.pbreak_row = if row < ROWS_PER_PATTERN { row } else { 0 };
-        self.posjump_flag = true;
+        self.state.pbreak_row = if row < ROWS_PER_PATTERN { row } else { 0 };
+        self.state.posjump_flag = true;
     }
 
     /// `mt_setspeed` (line 2338): below `$20` it is ticks per row, at or above
     /// it is beats per minute.
+    ///
+    /// **`F00` stops the module.** The replayer stores the zero speed and then
+    /// branches to `_mt_end` (line 2347), which clears `mt_Enable` and resets
+    /// the four channels — it does not carry on at some clamped speed, which
+    /// is what a player that only guards the division does. The difference is
+    /// audible on any module that ends with `F00`, and it is the difference
+    /// between a length and the whole rest of the pattern.
     fn set_speed(&mut self, param: u8) {
-        if param < SPEED_TEMPO_BOUNDARY {
-            self.speed = param;
-        } else {
-            self.tempo = u16::from(param);
+        if param >= SPEED_TEMPO_BOUNDARY {
+            self.state.tempo = u16::from(param);
+            return;
+        }
+        self.state.speed = param;
+        if param == 0 {
+            self.state.stopped = true;
+            // `resetch` on all four channels: `_mt_end` silences them rather
+            // than leaving the last note ringing.
+            for voice in &mut self.state.voices {
+                voice.active = false;
+            }
         }
     }
 
