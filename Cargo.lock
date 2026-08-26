@@ -46,10 +46,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfa5c490cac5afcf6a1100cca07689d78191478756909e19c98a3f5b4cf56e6d"
 
 [[package]]
+name = "format198x-commodore-amiga-ilbm"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45cdd65f89ae0464febcfd7d591791039b10b44cb9cc23e0b140b90ae0d748f9"
+
+[[package]]
+name = "format198x-commodore-amiga-mod"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9ce42b0108f0abeb4e715da41d55eb33683114c393c101ed4ec736866ce208b"
+
+[[package]]
 name = "format198x-commodore-amiga-powerpacker"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99a9f92204540842c9f3c61995b0accea6728217f9403061be00d118171048df"
+
+[[package]]
+name = "format198x-commodore-c64-art-studio"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "641c6f3b86ca751d339a99548aea33a6954f58519e7e03d4a632980bfef9cc04"
+
+[[package]]
+name = "format198x-commodore-c64-koala"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "965fe70853b9a857e4c6348e78e04e2dee23b99f234a49a252f4eb0a1145a176"
+
+[[package]]
+name = "format198x-sinclair-zx-spectrum-scr"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "610fabfd99082b0eab2a5ba3fb3bd77118defbbc5bb5ba3cba7f5baa30119612"
 
 [[package]]
 name = "hashbrown"
@@ -88,7 +118,12 @@ name = "play198x-core"
 version = "0.1.0"
 dependencies = [
  "format198x-commodore-amiga-adf",
+ "format198x-commodore-amiga-ilbm",
+ "format198x-commodore-amiga-mod",
  "format198x-commodore-amiga-powerpacker",
+ "format198x-commodore-c64-art-studio",
+ "format198x-commodore-c64-koala",
+ "format198x-sinclair-zx-spectrum-scr",
  "zip",
 ]
 
