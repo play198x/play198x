@@ -98,6 +98,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediaspec198x"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0820672d3555e99d340beca3bb704ae111ee04c25ab3b139950adf784d0772d5"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,6 +130,7 @@ dependencies = [
  "format198x-commodore-c64-art-studio",
  "format198x-commodore-c64-koala",
  "format198x-sinclair-zx-spectrum-scr",
+ "mediaspec198x",
  "zip",
 ]
 
