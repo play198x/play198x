@@ -18,7 +18,15 @@ license = "GPL-2.0-or-later"
 repository = "https://github.com/play198x/play198x"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` here, and `#![forbid(unsafe_code)]` at the top of `src/lib.rs`. The
+# published code is still forbidden outright — but a workspace-level `forbid`
+# also covers the test binaries, and `forbid` is the one level an inner
+# `#![allow]` cannot lift. That makes the allocation test impossible to write:
+# proving `render` allocates nothing needs a counting `GlobalAlloc`, which is
+# an unsafe trait. Denying here and forbidding in the library is the same
+# guarantee for everything that ships, and it matches how `unwrap_used` already
+# works in this workspace: denied globally, allowed per test binary.
+unsafe_code = "deny"
 unused_must_use = "deny"
 
 # `unwrap_used` and `expect_used` are denied because a panic reachable from a
