@@ -7,6 +7,8 @@
 use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 
+use format198x_commodore_amiga_adf::{Disk, EntryKind};
+
 use crate::Error;
 
 /// The most `read` will hand back for one entry.
@@ -24,6 +26,26 @@ const MAX_ENTRY_LEN: u64 = 16 * 1024 * 1024;
 
 /// How many bytes `open` looks at to tell one container shape from another.
 const SIGNATURE_LEN: usize = 4;
+
+/// A double-density Amiga floppy image: 1,760 blocks of 512 bytes.
+///
+/// An ADF has no magic number of its own — the bytes at offset 0 are the boot
+/// block, which a non-DOS disk fills with whatever it likes — so the length is
+/// the identifying signal. That is why `open` needs the file's size as well as
+/// its first four bytes.
+const ADF_DD_LEN: u64 = 901_120;
+
+/// A high-density Amiga floppy image: twice the double-density size.
+const ADF_HD_LEN: u64 = 1_802_240;
+
+/// The most entries `entries` will walk out of one disk image before giving
+/// up.
+///
+/// Every directory and file on an ADF occupies at least one 512-byte header
+/// block, and a double-density disk holds 1,760 of them, so a well-formed
+/// image cannot exceed this. A hostile one whose directories point at each
+/// other can, and the walk would otherwise never finish.
+const MAX_DISK_ENTRIES: usize = 1_760;
 
 /// One readable thing inside a container.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +72,11 @@ pub enum Container {
     /// call rather than held, so `read` needs only `&self` and no interior
     /// mutability — the access pattern is a handful of entries, not a stream.
     Zip(Vec<u8>),
+    /// A whole Amiga disk image, in memory. Held as bytes rather than as a
+    /// `Disk` for the same reason as `Zip`: a `Disk` borrows the image, so
+    /// storing one would make the container self-referential to buy nothing —
+    /// parsing 880K of already-resident bytes is a few microseconds.
+    Adf(Vec<u8>),
 }
 
 impl Container {
@@ -62,21 +89,42 @@ impl Container {
 
         // Sniff before loading. A plain file is read on demand, so pulling a
         // whole disk image into memory only to throw it away would be a cost
-        // paid on every thumbnail.
+        // paid on every thumbnail. Two cheap signals answer it: the first four
+        // bytes, and the length — which an ADF is identified by, having no
+        // magic number of its own.
+        let len = file.metadata()?.len();
         let mut signature = Vec::with_capacity(SIGNATURE_LEN);
         file.by_ref()
             .take(SIGNATURE_LEN as u64)
             .read_to_end(&mut signature)?;
-        if !is_zip(&signature) {
-            return Ok(Self::Plain(path.to_path_buf()));
+
+        if is_zip(&signature) {
+            // Parse once and discard: this is the check, not the read.
+            let bytes = whole(&mut file)?;
+            archive(&bytes)?;
+            return Ok(Self::Zip(bytes));
         }
 
-        file.seek(std::io::SeekFrom::Start(0))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        // Parse once and discard: this is the check, not the read.
-        archive(&bytes)?;
-        Ok(Self::Zip(bytes))
+        if len == ADF_HD_LEN {
+            // The reader has an Amiga disk image; say so, rather than let it
+            // reach the ADF crate and come back as a complaint about size.
+            // High-density images are real media this crate cannot yet read,
+            // which is a different fact from a damaged disk.
+            return Err(Error::UnsupportedContainer {
+                format: "HD ADF".to_owned(),
+                detail: "a 1.76 MB high-density Amiga disk image".to_owned(),
+            });
+        }
+
+        if len == ADF_DD_LEN {
+            // Validated here, like an archive, so a disk that turns out to
+            // carry no filesystem is reported where the caller named the file.
+            let bytes = whole(&mut file)?;
+            Disk::open(&bytes).map_err(from_adf)?;
+            return Ok(Self::Adf(bytes));
+        }
+
+        Ok(Self::Plain(path.to_path_buf()))
     }
 
     /// Every entry the container holds, in the order it holds them.
@@ -108,14 +156,55 @@ impl Container {
                 }
                 Ok(entries)
             }
+            Self::Adf(bytes) => {
+                let disk = Disk::open(bytes).map_err(from_adf)?;
+                let mut entries = Vec::new();
+                // Depth-first from the root, with subdirectories pushed in
+                // reverse so they come back out in listing order.
+                let mut pending = vec![String::new()];
+                let mut budget = MAX_DISK_ENTRIES;
+                while let Some(dir) = pending.pop() {
+                    let mut subdirs = Vec::new();
+                    for entry in disk.list(&dir).map_err(from_adf)? {
+                        let Some(left) = budget.checked_sub(1) else {
+                            return Err(Error::Container {
+                                what: "the directory tree does not terminate".to_owned(),
+                            });
+                        };
+                        budget = left;
+                        let path = join(&dir, &entry.name);
+                        match entry.kind {
+                            // Directories carry no bytes to probe or decode,
+                            // so they are walked but never listed.
+                            EntryKind::Directory => subdirs.push(path),
+                            EntryKind::File => entries.push(Entry {
+                                path,
+                                len: u64::from(entry.size),
+                            }),
+                        }
+                    }
+                    subdirs.reverse();
+                    pending.append(&mut subdirs);
+                }
+                Ok(entries)
+            }
         }
     }
 
-    /// Read one entry's bytes.
+    /// Read one entry's bytes, decrunched if they arrived PowerPacked.
     ///
-    /// Task 3 hangs transparent PowerPacker decrunching off this one point, so
-    /// that a packed file behaves the same inside an archive as on disk.
+    /// Transparent decrunching hangs off this one point rather than off each
+    /// container kind, so a PowerPacked module behaves the same on a disk
+    /// image, inside a ZIP, and sitting loose on the filesystem. Amiga music
+    /// disks make that ordinary: three of the first four modules found on a
+    /// real Gathering '92 disk during this project's research were PP20.
     pub fn read(&self, entry: &str) -> Result<Vec<u8>, Error> {
+        let bytes = self.read_raw(entry)?;
+        decrunched(entry, bytes)
+    }
+
+    /// The entry's bytes exactly as the container stores them.
+    fn read_raw(&self, entry: &str) -> Result<Vec<u8>, Error> {
         match self {
             Self::Plain(path) => {
                 if entry != basename(path)? {
@@ -158,7 +247,110 @@ impl Container {
                 }
                 Ok(out)
             }
+            Self::Adf(bytes) => {
+                let disk = Disk::open(bytes).map_err(from_adf)?;
+                // Look the entry up in its own directory before reading it.
+                // `Disk::read` reserves the file header's declared size up
+                // front, and that field is four attacker-controlled bytes, so
+                // the claim is checked here rather than allocated on trust.
+                // The lookup also settles the directory case the same way the
+                // ZIP path does.
+                let (dir, name) = split(entry);
+                let listing = disk.list(dir).map_err(|err| match from_adf(err) {
+                    // The parent directory is not there, so the entry is not
+                    // either — and it is the name the caller asked for that
+                    // has to come back, not the name of its missing parent.
+                    Error::NoSuchEntry { .. } => missing(entry),
+                    other => other,
+                })?;
+                let Some(found) = listing.into_iter().find(|e| e.name == name) else {
+                    return Err(missing(entry));
+                };
+                if found.kind == EntryKind::Directory {
+                    return Err(missing(entry));
+                }
+                let declared = u64::from(found.size);
+                if declared > MAX_ENTRY_LEN {
+                    return Err(too_large(entry, declared));
+                }
+                disk.read(entry).map_err(from_adf)
+            }
         }
+    }
+}
+
+/// Decrunch `bytes` if they are a PowerPacker stream, and hand them straight
+/// back if they are not.
+fn decrunched(entry: &str, bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
+    if !format198x_commodore_amiga_powerpacker::is_powerpacked(&bytes) {
+        return Ok(bytes);
+    }
+    // No declared-length check precedes this call, deliberately. A PP20 trailer
+    // states its decrunched length in three bytes and the decruncher allocates
+    // that much before reading a bit, which its documentation flags as the
+    // caller's problem — but three bytes cap it at 16,777,215, exactly one
+    // below `MAX_ENTRY_LEN`. The format cannot ask for more than this crate
+    // already allows, so a guard here would be unreachable, and the invariant
+    // that `read` never hands back more than the cap holds without one. Lower
+    // `MAX_ENTRY_LEN` past 16 MiB and that stops being true.
+    format198x_commodore_amiga_powerpacker::decrunch(&bytes).map_err(|err| Error::Container {
+        what: format!("entry `{entry}` is PowerPacked but could not be decrunched: {err}"),
+    })
+}
+
+/// Read the rest of `file` from the start.
+fn whole(file: &mut std::fs::File) -> Result<Vec<u8>, Error> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Map the ADF crate's errors onto this crate's, keeping the distinctions that
+/// matter to a reader looking at a disk that will not open.
+///
+/// The crate has no dedicated "carries no filesystem" variant: a disk whose
+/// boot block does not begin `DOS` comes back as `Corrupt` carrying that exact
+/// `what`. Matching the string is the only discriminator on offer, and this
+/// distinction is the whole reason the mapping exists, so it is matched
+/// deliberately rather than folded in with real corruption. The test
+/// `a_bootblock_disk_is_not_a_corrupt_adf` pins it, so an upgrade that reworded
+/// the string would fail a test rather than quietly reclassify every non-DOS
+/// disk as damage.
+fn from_adf(err: format198x_commodore_amiga_adf::Error) -> Error {
+    use format198x_commodore_amiga_adf::Error as Adf;
+    match err {
+        Adf::Corrupt {
+            what: "boot-block signature",
+        } => Error::NotAFilesystem,
+        Adf::UnsupportedContainer { format, detail } => Error::UnsupportedContainer {
+            format: format.to_owned(),
+            detail: detail.to_owned(),
+        },
+        // Both mean "nothing readable answers to that path" — `BadPath` is
+        // what the read side returns for a path naming the wrong kind.
+        Adf::NotFound { path } | Adf::BadPath { path, .. } => Error::NoSuchEntry { path },
+        other => Error::Container {
+            what: other.to_string(),
+        },
+    }
+}
+
+/// Split an entry path into its directory and its leaf name. An entry at the
+/// root has an empty directory, which is what `Disk::list` wants for it.
+fn split(entry: &str) -> (&str, &str) {
+    match entry.rsplit_once('/') {
+        Some((dir, name)) => (dir, name),
+        None => ("", entry),
+    }
+}
+
+/// Join a directory path and a child name, with no leading slash at the root.
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{dir}/{name}")
     }
 }
 

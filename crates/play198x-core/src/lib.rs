@@ -36,6 +36,18 @@ pub enum Error {
     /// The disk has no DOS filesystem — a bootblock or non-DOS disk, which is
     /// a different thing from a damaged one.
     NotAFilesystem,
+    /// The file is a disk image this crate does not read: a flux or archive
+    /// container such as IPF or DMS, or a high-density image. Named rather
+    /// than measured, for the same reason [`Self::NotAFilesystem`] exists —
+    /// telling the reader an IPF is the wrong *size* for an ADF sends them
+    /// checking a truncated file that was never an ADF in the first place.
+    UnsupportedContainer {
+        /// Short name of the format the bytes identify — `"IPF"`, `"DMS"`.
+        format: String,
+        /// What it is, in a clause that finishes "…, which this crate does
+        /// not read".
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -55,6 +67,10 @@ impl std::fmt::Display for Error {
             Self::NotAFilesystem => {
                 f.write_str("the disk carries no DOS filesystem, so it has no files to list")
             }
+            Self::UnsupportedContainer { format, detail } => write!(
+                f,
+                "the file is {format} — {detail}, which this crate does not read"
+            ),
         }
     }
 }

@@ -46,6 +46,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "format198x-commodore-amiga-adf"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfa5c490cac5afcf6a1100cca07689d78191478756909e19c98a3f5b4cf56e6d"
+
+[[package]]
+name = "format198x-commodore-amiga-powerpacker"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99a9f92204540842c9f3c61995b0accea6728217f9403061be00d118171048df"
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -87,6 +99,8 @@ dependencies = [
 name = "play198x-core"
 version = "0.1.0"
 dependencies = [
+ "format198x-commodore-amiga-adf",
+ "format198x-commodore-amiga-powerpacker",
  "zip",
 ]
 

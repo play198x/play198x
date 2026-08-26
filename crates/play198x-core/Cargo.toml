@@ -26,5 +26,16 @@ repository.workspace = true
 # method real archives of this material are stored with.
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
+# Amiga disk images. 0.2.3 specifically: it is the release that tells a
+# non-DOS disk apart from a damaged one, and names the containers (IPF, DMS,
+# and the like) that are Amiga media but not raw sector images. Earlier
+# releases fold both into "corrupt", which is the mistake this task exists to
+# avoid making downstream.
+format198x-commodore-amiga-adf = "0.2.3"
+# PowerPacked files decrunch on the way out of `read`, whatever container they
+# arrived in, so the dependency belongs to the container layer rather than the
+# decoders.
+format198x-commodore-amiga-powerpacker = "0.1.1"
+
 [lints]
 workspace = true
