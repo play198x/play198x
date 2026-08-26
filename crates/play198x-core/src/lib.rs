@@ -15,6 +15,12 @@
 //! for, and precisely what a hostile file asks for when it declares a size
 //! nobody checks.
 
+// Absolute, for the shipped code. The workspace lint table only denies, so
+// that a test binary can install the counting allocator that proves
+// `Engine::render` allocates nothing; nothing in this crate's own source is
+// allowed to reach for `unsafe` on the strength of that.
+#![forbid(unsafe_code)]
+
 pub mod container;
 pub mod decode;
 pub mod engine;

@@ -45,5 +45,25 @@ format198x-commodore-amiga-adf = "0.2.3"
 # decoders.
 format198x-commodore-amiga-powerpacker = "0.1.1"
 
+# Palettes and screen geometry for the fixed-palette machines. The Format198x
+# image crates expose palette *indices* and deliberately stop there: RGBA needs
+# a palette, palettes belong here under `198x/decisions/shared-media-spec.md`,
+# and a Format198x crate cannot depend on this one without breaking the
+# dependency-free rule that is the reason Format198x exists. So the conversion
+# lives in `decode`, and this is where it gets its colours — and its pixel
+# aspects, which are just as much spec data as the colours are.
+mediaspec198x = "0.1.0"
+
+# The decoders `probe` identifies for and `decode` dispatches to. `probe` needs
+# them for their exported constants alone — `LOAD_ADDRESS`, `FILE_LEN`,
+# `MIN_FILE_LEN`, `is_module` — which is why they arrive with this task rather
+# than with decoding: repeating 0x6000 or 10003 here would let the two copies
+# drift apart with nothing to notice.
+format198x-commodore-amiga-mod = "0.1.1"
+format198x-commodore-amiga-ilbm = "0.1.1"
+format198x-commodore-c64-koala = "0.1.1"
+format198x-commodore-c64-art-studio = "0.1.1"
+format198x-sinclair-zx-spectrum-scr = "0.1.1"
+
 [lints]
 workspace = true
