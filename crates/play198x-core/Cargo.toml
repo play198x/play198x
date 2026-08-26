@@ -24,7 +24,15 @@ repository.workspace = true
 # deliberately: zip's defaults pull AES, bzip2, LZMA, PPMd, zstd, XZ and
 # Deflate64, none of which an archive of retro media uses. DEFLATE is the one
 # method real archives of this material are stored with.
-zip = { version = "8", default-features = false, features = ["deflate"] }
+#
+# `deflate-flate2-zlib-rs` rather than the `deflate` umbrella, which also pulls
+# `deflate-zopfli`. Zopfli is a best-compression *writer*; this crate only
+# reads, and the test writer asks for `CompressionMethod::Deflated`, which
+# flate2 handles. Naming the one backend drops `zopfli`, `bumpalo` and `log`
+# from every consumer's graph.
+zip = { version = "8", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+] }
 
 # Amiga disk images. 0.2.3 specifically: it is the release that tells a
 # non-DOS disk apart from a damaged one, and names the containers (IPF, DMS,
