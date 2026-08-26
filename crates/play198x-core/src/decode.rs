@@ -45,6 +45,16 @@ pub struct Image {
     /// a shell that ignores this draws a C64 multicolour picture at half its
     /// real width. Both components are non-zero.
     pub pixel_aspect: (u32, u32),
+    /// The colours the picture was drawn from, in hardware index order —
+    /// `mediaspec198x`'s table for the fixed-palette machines, the file's own
+    /// CMAP for an ILBM.
+    ///
+    /// Kept because it cannot be recovered from [`rgba`](Self::rgba)
+    /// afterwards: a picture that never uses colour 5 loses it, and the index
+    /// order goes with it. `metadata::image_meta` reports this, and a shell
+    /// that offers a palette view or a recolour needs it; deriving it from the
+    /// pixels instead would be a different, smaller fact wearing the same name.
+    pub palette: Vec<(u8, u8, u8)>,
     /// What the bytes were identified as.
     pub format: Format,
 }
@@ -138,6 +148,15 @@ fn pixel_aspect(mode: &ScreenMode) -> (u32, u32) {
     )
 }
 
+/// A spec palette as plain triples, for [`Image::palette`].
+///
+/// The public type says `(u8, u8, u8)` rather than `mediaspec198x::Rgb` so that
+/// the ILBM path, whose colours come from a file and never touch the spec, can
+/// report in the same terms as the machines that do.
+fn triples(palette: &NamedPalette) -> Vec<(u8, u8, u8)> {
+    palette.colours.iter().map(|c| (c.r, c.g, c.b)).collect()
+}
+
 /// Append one hardware colour index's RGBA to `rgba`.
 ///
 /// Indexing `colours` directly would be a panic on a palette shorter than the
@@ -227,6 +246,7 @@ fn spectrum_screen(bytes: &[u8]) -> Result<Image, Error> {
         height: u32::from(mode.paper_height),
         rgba,
         pixel_aspect: pixel_aspect(mode),
+        palette: triples(palette),
         format: FORMAT,
     })
 }
@@ -292,6 +312,7 @@ fn from_indices(
         height: u32::from(mode.paper_height),
         rgba,
         pixel_aspect: pixel_aspect(mode),
+        palette: triples(palette),
         format,
     })
 }
@@ -344,6 +365,7 @@ fn ilbm(bytes: &[u8]) -> Result<Image, Error> {
         height: u32::from(picture.height),
         rgba,
         pixel_aspect: pixel_aspect(amiga_mode(&picture, FORMAT)?),
+        palette: picture.palette.iter().map(|&[r, g, b]| (r, g, b)).collect(),
         format: FORMAT,
     })
 }

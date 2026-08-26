@@ -51,6 +51,33 @@ pub struct Cell {
     pub param: u8,
 }
 
+/// A module's text fields: the title, and a name for any of the 31 sample
+/// slots.
+///
+/// Raw bytes rather than `&str` because Amiga text is ISO-8859-1, and the
+/// names worth pinning are exactly the ones a UTF-8 reading would lose.
+pub struct Text<'a> {
+    /// The title field's content, before its NUL padding. Truncated at 20
+    /// bytes, which is all the field holds.
+    pub title: &'a [u8],
+    /// Name bytes per slot, in slot order, truncated at 22 bytes each. Slots
+    /// past the end of this list are left blank.
+    ///
+    /// A slot named here need not carry any sample data, and the metadata
+    /// tests rely on that: authors hid messages in the slots a song never
+    /// plays.
+    pub sample_names: &'a [&'a [u8]],
+}
+
+impl Default for Text<'_> {
+    fn default() -> Self {
+        Self {
+            title: b"FIXTURE",
+            sample_names: &[],
+        }
+    }
+}
+
 /// Assemble a four-channel `M.K.` module and decode it.
 ///
 /// `song_length` is passed separately from `orders` so a test can state a song
@@ -62,12 +89,28 @@ pub fn module(
     orders: &[u8],
     song_length: u8,
 ) -> Module {
-    let mut out = b"FIXTURE".to_vec();
-    out.resize(20, 0);
+    module_with_text(&Text::default(), samples, patterns, orders, song_length)
+}
+
+/// As [`module`], with the title and the sample names stated.
+pub fn module_with_text(
+    text: &Text<'_>,
+    samples: &[SampleSpec],
+    patterns: &[Vec<Cell>],
+    orders: &[u8],
+    song_length: u8,
+) -> Module {
+    let mut out = vec![0u8; 20];
+    let title = &text.title[..text.title.len().min(20)];
+    out[..title.len()].copy_from_slice(title);
 
     for slot in 0..31 {
         let spec = samples.get(slot);
         let mut header = vec![0u8; 30];
+        if let Some(name) = text.sample_names.get(slot) {
+            let name = &name[..name.len().min(22)];
+            header[..name.len()].copy_from_slice(name);
+        }
         if let Some(spec) = spec {
             let words = u16::try_from(spec.data.len() / 2).unwrap();
             header[22..24].copy_from_slice(&words.to_be_bytes());
