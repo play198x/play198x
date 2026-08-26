@@ -63,6 +63,7 @@ fn rendering_a_second_of_audio_allocates_nothing() {
             channel: 0,
             sample: 1,
             period: 428,
+            ..Cell::default()
         }]],
         &[0],
         1,

@@ -33,6 +33,11 @@ impl SampleSpec {
 
 /// One pattern cell worth setting. Everything not named is zero, which is the
 /// format's own "nothing happens here".
+///
+/// `Default` exists so a cell can name only the fields it cares about:
+/// most tests set a note and no effect, and every effect test sets an effect
+/// on a row that may or may not carry a note.
+#[derive(Default)]
 pub struct Cell {
     pub row: usize,
     pub channel: usize,
@@ -40,6 +45,10 @@ pub struct Cell {
     pub sample: u8,
     /// Amiga period. 0 means "no note".
     pub period: u16,
+    /// Effect number, 0..=15. The high nibble of the cell's third byte.
+    pub effect: u8,
+    /// Effect parameter byte.
+    pub param: u8,
 }
 
 /// Assemble a four-channel `M.K.` module and decode it.
@@ -82,7 +91,8 @@ pub fn module(
             let at = (cell.row * 4 + cell.channel) * 4;
             pattern[at] = (cell.sample & 0xF0) | u8::try_from(cell.period >> 8).unwrap();
             pattern[at + 1] = (cell.period & 0xFF) as u8;
-            pattern[at + 2] = (cell.sample & 0x0F) << 4;
+            pattern[at + 2] = ((cell.sample & 0x0F) << 4) | (cell.effect & 0x0F);
+            pattern[at + 3] = cell.param;
         }
         out.extend_from_slice(&pattern);
     }

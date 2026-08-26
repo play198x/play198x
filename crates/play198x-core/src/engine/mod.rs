@@ -1,4 +1,4 @@
-//! The ProTracker engine: sequencer, mixer, transport and timing.
+//! The ProTracker engine: sequencer, mixer, effects, transport and timing.
 //!
 //! The engine never owns an audio device. A caller pulls frames from it, which
 //! is what lets the same code drive a desktop audio callback, a WebAudio worklet
@@ -16,12 +16,14 @@
 //!
 //! # Shape, and why it is this shape
 //!
-//! [`Engine::advance_tick`] is the single place the sequence moves. Effects
-//! (the next task) hang off the two branches inside it, and computing a
-//! module's duration walks it with the mixer switched off — the same code
-//! path, not a second implementation that can drift from what playback does.
+//! [`Engine::advance_tick`] is the single place the sequence moves, and the
+//! three effect dispatch tables in [`effects`] hang off its two branches:
+//! `fx_tab` on the tick that does not fetch a row, `prefx_tab` and
+//! `morefx_tab` on the one that does. Computing a module's duration walks the
+//! same function with the mixer switched off — the same code path, not a
+//! second implementation that can drift from what playback does.
 //!
-//! Per-tick effects will therefore run on `speed - 1` ticks of each row, not
+//! Per-tick effects therefore run on `speed - 1` ticks of each row, not
 //! `speed`: the replayer's `mt_music` calls `mt_checkfx` only when the tick
 //! counter has *not* wrapped, so the note tick is not one of them. See
 //! `reference/by-topic/music-formats/protracker-playback-reference.md`.
@@ -83,41 +85,146 @@ pub struct Position {
 }
 
 /// One of the four voices.
+///
+/// The split between a *stored* value and a *sounding* one is the replayer's
+/// own and matters: vibrato and arpeggio write Paula's period register without
+/// writing the channel's stored period back (`mt_vibrato_nc`, line 2153). A
+/// player that stores it integrates the sweep and the note sails away instead
+/// of wobbling.
 #[derive(Debug, Clone, Copy)]
 struct Voice {
     /// Which sample slot is selected, if a note has ever chosen one.
     sample: Option<usize>,
+    /// That sample's length in bytes, so the voice can be restarted without
+    /// reaching back into the module.
+    data_len: usize,
     /// Whether it is currently sounding.
     active: bool,
-    /// Amiga period. Kept even when silent: a period with no sample number
-    /// replays the selected sample, and a sample number with no period sets
-    /// volume without retriggering.
+
+    /// Amiga period, `n_period`: what a slide or a new note leaves behind.
+    /// Kept even when silent — a period with no sample number replays the
+    /// selected sample, and a sample number with no period sets volume
+    /// without retriggering.
     period: u16,
+    /// The period Paula is actually playing at, `AUDPER`.
+    play_period: u16,
+    /// Channel volume, `n_volume`.
     volume: u8,
+    /// The volume Paula is actually playing at, `AUDVOL`. Only tremolo makes
+    /// it differ from `volume`.
+    play_volume: u8,
+
     /// Playback position in bytes, fractional between output frames.
     position: f64,
     /// Bytes of sample data consumed per output frame.
     step: f64,
     /// Byte offset this pass ends at.
     end: usize,
+
+    /// Byte offset the next trigger starts at, `n_start`. `9xx` moves it.
+    start: usize,
+    /// Bytes the first pass plays, `n_length`. `9xx` shortens it.
+    length: usize,
     loop_start: usize,
     /// Loop length in bytes, `0` when the sample does not loop.
     loop_len: usize,
+
+    /// The row's period, `0` when the row carries no note. `E9x` and `EDx`
+    /// both branch on whether this row had one.
+    note_period: u16,
+    /// The row's effect number and parameter, `n_cmd`. They persist for the
+    /// whole row, including through a pattern delay's extra rounds.
+    effect: u8,
+    param: u8,
+    /// Whether the row's cell was entirely zero, which is how the replayer
+    /// decides to re-assert the period at the next note tick.
+    cell_empty: bool,
+
+    /// Index into [`effects::PERIOD_TABLE`], `0..16`.
+    finetune: usize,
+    /// The note the current period came from, `0..36`. Arpeggio and glissando
+    /// step from it.
+    note_index: usize,
+    /// Tone portamento's target, `0` when there is nothing to slide to.
+    wanted_period: u16,
+    tone_speed: u8,
+    glissando: bool,
+    vib_pos: u8,
+    vib_speed: u8,
+    vib_amp: u8,
+    vib_ctrl: u8,
+    trem_pos: u8,
+    trem_speed: u8,
+    trem_amp: u8,
+    trem_ctrl: u8,
+    /// The offset `900` reuses.
+    sample_offset: u8,
+    /// Ticks left before `E9x` retriggers.
+    retrig_count: u8,
+    /// The row `E60` marked as a loop start.
+    loop_row: usize,
+    /// Repeats left for `E6x`. Negative means "not started".
+    loop_count: i8,
 }
 
 impl Voice {
     const fn silent() -> Self {
         Self {
             sample: None,
+            data_len: 0,
             active: false,
             period: 0,
+            play_period: 0,
             volume: 0,
+            play_volume: 0,
             position: 0.0,
             step: 0.0,
             end: 0,
+            start: 0,
+            length: 0,
             loop_start: 0,
             loop_len: 0,
+            note_period: 0,
+            effect: 0,
+            param: 0,
+            cell_empty: true,
+            finetune: 0,
+            note_index: 0,
+            wanted_period: 0,
+            tone_speed: 0,
+            glissando: false,
+            vib_pos: 0,
+            vib_speed: 0,
+            vib_amp: 0,
+            vib_ctrl: 0,
+            trem_pos: 0,
+            trem_speed: 0,
+            trem_amp: 0,
+            trem_ctrl: 0,
+            sample_offset: 0,
+            retrig_count: 0,
+            loop_row: 0,
+            loop_count: 0,
         }
+    }
+
+    /// Write Paula's period register: the one place playback pitch changes.
+    ///
+    /// A period of zero is a module that never gave this voice a note, and
+    /// dividing by it would produce an infinite rate rather than a refused
+    /// one, so it is floored at one.
+    fn set_audper(&mut self, period: u16, sample_rate: f64) {
+        self.play_period = period;
+        self.step = PAULA_CLOCK_PAL / (2.0 * f64::from(period.max(1))) / sample_rate;
+    }
+
+    /// Start the sample from `start` — a new note, `E9x` retrigger, or `EDx`
+    /// note delay reaching its tick (`do_retrigger`, line 2528).
+    fn retrigger(&mut self) {
+        let start = self.start.min(self.data_len);
+        self.position = start as f64;
+        self.end = (start + self.length).min(self.data_len);
+        self.active = self.end > start;
     }
 
     /// One frame of this voice, before panning.
@@ -134,7 +241,7 @@ impl Voice {
         // and `position` is bounded by `end` regardless, which is bounded by
         // `data.len()`. The `get` is belt and braces on an FFI-facing path.
         let value = data.get(self.position as usize).map_or(0, |b| *b as i8);
-        let out = f32::from(value) / 128.0 * f32::from(self.volume) / f32::from(MAX_VOLUME);
+        let out = f32::from(value) / 128.0 * f32::from(self.play_volume) / f32::from(MAX_VOLUME);
 
         self.position += self.step;
         if self.position >= self.end as f64 {
@@ -158,10 +265,11 @@ impl Voice {
 ///
 /// Construct it with [`Engine::new`] and pull frames with [`Engine::render`].
 /// Nothing here allocates after construction, and nothing here panics: a
-/// module with a zero-length sample, a loop pointing past the end of its data
-/// or an order naming a pattern the file does not contain all render as
-/// something, because this crate sits behind an FFI boundary where unwinding
-/// is undefined behaviour.
+/// module with a zero-length sample, a loop pointing past the end of its data,
+/// an order naming a pattern the file does not contain, a portamento target of
+/// zero or a sample offset past the end of its sample all render as something,
+/// because this crate sits behind an FFI boundary where unwinding is undefined
+/// behaviour.
 pub struct Engine {
     module: Module,
     /// Output frames per second. Clamped away from zero at construction so the
@@ -185,6 +293,17 @@ pub struct Engine {
     /// Set when the sequencer must (re)start a row without stepping to the
     /// next one first: at construction, and after a seek.
     row_pending: bool,
+
+    /// The row the next step jumps to, `mt_PBreakPos`. `Dxy` and `E6x` set it.
+    pbreak_row: usize,
+    /// `mt_PBreakFlag`: an `E6x` pattern loop, which stays inside the pattern.
+    pbreak_flag: bool,
+    /// `mt_PosJumpFlag`: a `Bxy` or `Dxy`, which move to the next order.
+    posjump_flag: bool,
+    /// `mt_PattDelTime`: the delay `EEx` asked for, before it takes effect.
+    patt_del_time: u8,
+    /// `mt_PattDelTime2`: extra rounds of the current row still to play.
+    patt_del_time2: u8,
 }
 
 impl Engine {
@@ -207,6 +326,11 @@ impl Engine {
             row: 0,
             tick: 0,
             row_pending: true,
+            pbreak_row: 0,
+            pbreak_flag: false,
+            posjump_flag: false,
+            patt_del_time: 0,
+            patt_del_time2: 0,
         }
     }
 
@@ -272,13 +396,40 @@ impl Engine {
         self.row_pending = true;
         self.frames_to_next_tick = 0.0;
         self.voices = [Voice::silent(); CHANNELS];
+        self.pbreak_row = 0;
+        self.pbreak_flag = false;
+        self.posjump_flag = false;
+        self.patt_del_time = 0;
+        self.patt_del_time2 = 0;
+    }
+
+    /// A channel's stored volume, `0..=64`.
+    ///
+    /// Test-facing, and hidden from the documented surface: an effect is only
+    /// observable through `render`'s output, but asserting a volume slide's
+    /// step count against an envelope measures the mixer as much as the
+    /// effect. This exposes the one number without making the mixer public.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_channel_volume(&self, channel: usize) -> u8 {
+        self.voices.get(channel).map_or(0, |voice| voice.volume)
+    }
+
+    /// The period a channel is *sounding* at — Paula's `AUDPER`, not the
+    /// stored period, so a vibrato or an arpeggio is visible here.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_channel_period(&self, channel: usize) -> u16 {
+        self.voices
+            .get(channel)
+            .map_or(0, |voice| voice.play_period)
     }
 
     /// Output frames in one tick: `sample_rate * (2500 / tempo) / 1000`.
     ///
-    /// Recomputed each tick rather than cached, so that the tempo effect
-    /// arriving in the next task cannot leave a stale figure behind. One
-    /// division per 20 ms is not a cost worth a cache-invalidation bug.
+    /// Recomputed each tick rather than cached, so that `Fxy` setting the
+    /// tempo cannot leave a stale figure behind. One division per 20 ms is not
+    /// a cost worth a cache-invalidation bug.
     fn frames_per_tick(&self) -> f64 {
         // `max(1)` because `Fxy` can name a tempo of zero, and dividing by it
         // would produce an infinite tick rather than a refused one.
@@ -296,9 +447,9 @@ impl Engine {
 
     /// Move the sequence on by one tick.
     ///
-    /// The one place playback advances. Task 7's effect tables hang off the
-    /// two branches below, and duration measurement walks this with the mixer
-    /// switched off rather than reimplementing it.
+    /// The one place playback advances, and the place the three effect tables
+    /// hang off. Duration measurement walks this with the mixer switched off
+    /// rather than reimplementing it.
     fn advance_tick(&mut self) {
         if self.module.orders().is_empty() {
             return;
@@ -314,52 +465,98 @@ impl Engine {
         self.tick += 1;
         // `max(1)` because `F00` can set the speed to zero, and a row of zero
         // ticks would otherwise stall the comparison rather than the song.
-        if self.tick >= self.speed.max(1) {
-            self.tick = 0;
-            self.step_row();
-            self.start_row();
+        if self.tick < self.speed.max(1) {
+            // An ordinary tick: `fx_tab` only. This branch is why a per-tick
+            // effect runs `speed - 1` times a row.
+            self.run_fx();
+            return;
         }
-        // Otherwise this is a plain tick: `fx_tab` effects run here, which is
-        // why they run `speed - 1` times per row. Task 7.
+
+        self.tick = 0;
+        // The replayer steps the pattern at the *end* of a note tick
+        // (`pattern_step`, line 1387). Doing it here instead, at the start of
+        // the next one, consumes the same flags in the same order and keeps
+        // `position` naming the row that is sounding rather than the one
+        // queued behind it.
+        self.pattern_step();
+        if self.patt_del_time2 == 0 {
+            self.start_row();
+        } else {
+            // A pattern delay's extra round does not re-fetch the row, so no
+            // note retriggers and only `fx_tab` runs — on the note tick too.
+            self.run_fx();
+        }
     }
 
-    /// Step to the next row, wrapping through the order table.
+    /// `pattern_step` (line 1387): decide which row plays next.
+    ///
+    /// Pattern delay can hold the row, `E6x` can jump back inside the pattern,
+    /// and `Bxy`/`Dxy` move to the next order. All three are flags the row
+    /// just played left behind.
+    fn pattern_step(&mut self) {
+        let mut advance = true;
+        let mut delay = self.patt_del_time2;
+        if self.patt_del_time != 0 {
+            delay = self.patt_del_time;
+            self.patt_del_time = 0;
+        }
+        if delay != 0 {
+            delay -= 1;
+            if delay != 0 {
+                advance = false;
+            }
+            self.patt_del_time2 = delay;
+        }
+
+        self.row += usize::from(advance);
+        if self.pbreak_flag {
+            self.pbreak_flag = false;
+            self.row = self.pbreak_row;
+            self.pbreak_row = 0;
+        }
+        if self.row >= ROWS_PER_PATTERN || self.posjump_flag {
+            self.song_step();
+        }
+    }
+
+    /// `song_step` (line 1424): move to the next order.
     ///
     /// ProTracker 2.3 restarts a finished song at order 0 and ignores the
     /// module's restart byte, which is a Noisetracker leftover that real files
-    /// routinely leave at 127 (`mt_nextposition`, `song_step`).
-    fn step_row(&mut self) {
-        self.row += 1;
-        if self.row >= ROWS_PER_PATTERN {
-            self.row = 0;
-            self.order += 1;
-            if self.order >= self.module.orders().len() {
-                self.order = 0;
-            }
+    /// routinely leave at 127.
+    fn song_step(&mut self) {
+        self.row = self.pbreak_row;
+        self.pbreak_row = 0;
+        self.posjump_flag = false;
+        // `and.w #$007f`: the order is a 7-bit field, so it wraps rather than
+        // running off the 128-entry table.
+        self.order = (self.order + 1) & 0x7F;
+        if self.order >= self.module.orders().len() {
+            self.order = 0;
         }
     }
 
-    /// Act on the row the sequencer has arrived at.
+    /// Act on the row the sequencer has arrived at: `prefx_tab`, the period,
+    /// then `morefx_tab`, per channel.
     fn start_row(&mut self) {
         let pattern = self.current_pattern();
-        // An order naming a pattern the file does not hold plays as silence
-        // and takes its normal time. Real files carry garbage in the unplayed
-        // tail of the order table; refusing to play, or reading past the end,
-        // are both worse answers than a quiet row.
-        let Some(row) = self
+        // An order naming a pattern the file does not hold plays as an empty
+        // row and takes its normal time. Real files carry garbage in the
+        // unplayed tail of the order table; refusing to play, or reading past
+        // the end, are both worse answers than a quiet row.
+        //
+        // Copied out so the voices can be borrowed mutably below. `Note` is
+        // 6 bytes and `Copy`; this is a register shuffle, not an allocation.
+        let notes: [Note; CHANNELS] = self
             .module
             .patterns
             .get(pattern)
             .and_then(|pattern| pattern.get(self.row))
-        else {
-            return;
-        };
-        // Copied out so the voices can be borrowed mutably below. `Note` is
-        // 6 bytes and `Copy`; this is a register shuffle, not an allocation.
-        let notes: [Note; CHANNELS] = *row;
+            .copied()
+            .unwrap_or_default();
 
-        for (voice, note) in self.voices.iter_mut().zip(notes) {
-            trigger(voice, note, &self.module, self.sample_rate);
+        for (channel, note) in notes.into_iter().enumerate() {
+            self.play_voice(channel, note);
         }
     }
 
@@ -381,62 +578,4 @@ impl Engine {
         }
         (left * VOICE_GAIN, right * VOICE_GAIN)
     }
-}
-
-/// Apply one pattern cell to one voice.
-///
-/// A sample number selects the sample and takes its volume without
-/// retriggering; a period retriggers whatever sample is selected. Both
-/// together is the ordinary case of a note being played.
-fn trigger(voice: &mut Voice, note: Note, module: &Module, sample_rate: f64) {
-    if note.sample != 0 {
-        let slot = usize::from(note.sample) - 1;
-        // A sample number past the 31 slots selects nothing. Files do this;
-        // ProTracker reads whatever is at that offset, which is not a
-        // behaviour worth reproducing.
-        if let Some(sample) = module.samples.get(slot) {
-            voice.sample = Some(slot);
-            voice.volume = sample.volume.min(MAX_VOLUME);
-        }
-    }
-
-    if note.period == 0 {
-        return;
-    }
-    voice.period = note.period;
-
-    let Some(sample) = voice.sample.and_then(|slot| module.samples.get(slot)) else {
-        return;
-    };
-    let len = sample.data.len();
-    if len == 0 {
-        voice.active = false;
-        return;
-    }
-
-    // Clamped, because a header can point its loop past the end of its own
-    // data and this crate does not get to panic about that. A loop clamped to
-    // nothing becomes a one-shot: the sample plays through and stops.
-    let loop_start = sample.loop_start().min(len);
-    let loop_len = if sample.is_looped() {
-        sample.loop_len().min(len - loop_start)
-    } else {
-        0
-    };
-
-    // The first pass is not always the loop. ProTracker programs Paula with
-    // `repeat_start + repeat_length` words when the loop starts partway in,
-    // and with the whole sample when it starts at zero — so a sample with a
-    // short loop at offset zero still plays all the way through once before it
-    // begins repeating (`mt_playvoice`, `set_len_start`).
-    voice.end = if loop_len > 0 && sample.repeat_start_words != 0 {
-        (loop_start + loop_len).min(len)
-    } else {
-        len
-    };
-    voice.loop_start = loop_start;
-    voice.loop_len = loop_len;
-    voice.position = 0.0;
-    voice.step = PAULA_CLOCK_PAL / (2.0 * f64::from(note.period)) / sample_rate;
-    voice.active = voice.end > 0;
 }

@@ -28,6 +28,7 @@ fn one_pattern_module() -> format198x_commodore_amiga_mod::Module {
             channel: 0,
             sample: 1,
             period: 428,
+            ..Cell::default()
         }]],
         &[0],
         1,
@@ -164,6 +165,7 @@ fn a_one_shot_sample_stops_at_the_end_of_its_data() {
             channel: 0,
             sample: 1,
             period: 428,
+            ..Cell::default()
         }]],
         &[0],
         1,
@@ -226,6 +228,7 @@ fn channels_are_hard_panned_and_scaled_to_leave_no_clipping() {
                 channel,
                 sample: 1,
                 period: 428,
+                ..Cell::default()
             }]],
             &[0],
             1,
@@ -262,6 +265,7 @@ fn volume_scales_the_output_linearly() {
                 channel: 0,
                 sample: 1,
                 period: 428,
+                ..Cell::default()
             }]],
             &[0],
             1,
@@ -360,6 +364,7 @@ fn seeking_moves_the_sequencer_and_cuts_the_sounding_voices() {
                 channel: 0,
                 sample: 1,
                 period: 428,
+                ..Cell::default()
             }],
             vec![],
         ],
@@ -401,6 +406,7 @@ fn hostile_modules_render_without_panicking() {
             channel: 0,
             sample,
             period: 428,
+            ..Cell::default()
         }]
     };
 
