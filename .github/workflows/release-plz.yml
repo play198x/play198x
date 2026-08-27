@@ -76,14 +76,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
-      # Announce the release in Discord. Every crate released in this run goes
-      # into a single message rather than one post per crate: versioning here is
-      # per-package, so a normal cycle releases several at once and a post each
-      # would bury the channel.
+      # Announce the release in Discord.
       #
-      # Reads DISCORD_RELEASE_WEBHOOK (org-level secret). Absent, the step logs
-      # and succeeds — a missing notification must not fail a release that has
-      # already published to crates.io.
+      # release-plz reports only package_name, version and tag — no notes. The
+      # notes it wrote are in each crate's CHANGELOG.md, committed by the
+      # release PR, so main already holds them when this runs. The script reads
+      # them there, which gives every crate its own changelog in the
+      # announcement rather than a bare list of links.
+      #
+      # Reads DISCORD_RELEASE_WEBHOOK (this project's channel) and
+      # DISCORD_RELEASE_WEBHOOK_ALL (a channel carrying every repo), both
+      # optional. With neither set the step logs and succeeds — a missing
+      # notification must not fail a release that has already published.
       - name: Announce the release in Discord
         if: steps.release.outputs.releases_created == 'true'
         env:
@@ -95,11 +99,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Post to this project's own channel and, when set, an aggregate
-          # channel carrying every repo. Built with `if` rather than
-          # `[ -n "$x" ] && arr+=(...)`: under `set -e` a failing test at the end
-          # of a command list exits the step, so the shorter form would abort
-          # whenever a secret is unset — the normal case this tolerates.
+          # Built with `if` rather than `[ -n "$x" ] && arr+=(...)`: under
+          # `set -e` a failing test at the end of a command list exits the step,
+          # so the shorter form would abort whenever a secret is unset.
           targets=()
           if [ -n "${WEBHOOK}" ]; then
             targets+=("$WEBHOOK")
@@ -115,45 +117,26 @@ jobs:
             exit 0
           fi
 
-          count=$(jq 'length' <<<"$RELEASES")
-          if [ "$count" = "0" ]; then
-            echo "::notice::no releases in this run — nothing posted."
-            exit 0
-          fi
+          rm -f payload-*.json
+          python3 scripts/discord-release-payloads.py \
+            --releases "$RELEASES" \
+            --repo "$REPO" \
+            --server-url "$SERVER_URL"
 
-          # One embed field per crate, each linking to its own GitHub Release.
-          # Built with jq throughout so crate names and versions are escaped
-          # rather than pasted into a hand-written JSON string.
-          jq -n \
-            --argjson releases "$RELEASES" \
-            --arg repo "$REPO" \
-            --arg base "${SERVER_URL}/${REPO}/releases/tag" \
-            --arg title "$( [ "$count" = "1" ] && echo "play198x — 1 crate released" || echo "play198x — ${count} crates released" )" \
-            '{
-               username: "198x releases",
-               embeds: [{
-                 title: $title,
-                 url: ($base + "/" + ($releases[0].tag // ($releases[0].package_name + "-v" + $releases[0].version))),
-                 color: 3066993,
-                 fields: ($releases | map({
-                   name: (.package_name + " v" + .version),
-                   value: ("[release notes](" + $base + "/" + (.tag // (.package_name + "-v" + .version)) + ") · [crates.io](https://crates.io/crates/" + .package_name + "/" + .version + ")"),
-                   inline: false
-                 })),
-                 footer: { text: $repo }
-               }]
-             }' > payload.json
-
-          # Every target is attempted even if an earlier one fails, so a stale
-          # aggregate URL cannot hide a successful post to the project channel.
+          # Every message and every target is attempted even if one fails, so a
+          # stale aggregate URL cannot hide a successful post to the project
+          # channel, and a rejected message cannot swallow the rest.
           failed=0
-          for target in "${targets[@]}"; do
-            if ! curl --silent --show-error --fail-with-body \
-                      --retry 3 --retry-delay 5 --retry-all-errors \
-                      -H "Content-Type: application/json" \
-                      -X POST -d @payload.json "$target"; then
-              failed=1
-            fi
+          shopt -s nullglob
+          for payload in payload-*.json; do
+            for target in "${targets[@]}"; do
+              if ! curl --silent --show-error --fail-with-body \
+                        --retry 3 --retry-delay 5 --retry-all-errors \
+                        -H "Content-Type: application/json" \
+                        -X POST -d @"$payload" "$target"; then
+                failed=1
+              fi
+            done
           done
 
           if [ "$failed" -ne 0 ]; then
@@ -161,4 +144,4 @@ jobs:
             exit 1
           fi
 
-          echo "Announced ${count} crate(s) to Discord."
+          echo "Announced to ${#targets[@]} Discord channel(s)."
