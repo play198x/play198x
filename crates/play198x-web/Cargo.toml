@@ -1,0 +1,30 @@
+[package]
+name = "play198x-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/play198x/play198x"
+description = "wasm-bindgen shell over play198x-core, for build-time and browser decoding."
+# Not published: a #[wasm_bindgen] surface returning JavaScript values has no
+# Rust caller. Anything native uses play198x-core, which is published.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+play198x-core = { path = "../play198x-core" }
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"

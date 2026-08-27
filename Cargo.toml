@@ -7,6 +7,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/play198x-core"]
+# `crates/play198x-web` is a standalone wasm-bindgen shell. It is excluded so its
+# wasm toolchain and its `unsafe_code` allowance (see that crate's manifest) stay
+# out of the library, which forbids unsafe outright.
+exclude = ["crates/play198x-web"]
 
 [workspace.package]
 edition = "2024"
