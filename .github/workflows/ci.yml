@@ -94,3 +94,55 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace
+
+  # `play198x-web` is excluded from the workspace (see the root Cargo.toml), so
+  # none of the jobs above ever build, test, or lint it. Without this job the
+  # shell has no CI at all.
+  shell:
+    name: Shell (wasm-bindgen)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/play198x-web -> target
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      # A plain `cargo test` on this crate builds for the host target and
+      # silently runs zero tests: `#[wasm_bindgen_test]` only registers with
+      # the `wasm-bindgen-test-runner` harness, which needs the wasm32 target.
+      # `wasm-pack test` wires both up, so this is the form that actually
+      # executes `tests/boundary.rs` rather than reporting a false green.
+      - name: Test the shell
+        run: wasm-pack test --node crates/play198x-web
+
+      - name: Clippy the shell
+        run: cargo clippy --manifest-path crates/play198x-web/Cargo.toml --all-targets -- -D warnings
+
+      # Both targets are built so the browser target cannot rot: it has no
+      # consumer yet, and nothing else would notice it breaking.
+      - name: Build the nodejs target
+        run: wasm-pack build crates/play198x-web --target nodejs --out-dir pkg-node
+
+      - name: Build the web target
+        run: wasm-pack build crates/play198x-web --target web --out-dir pkg-web
