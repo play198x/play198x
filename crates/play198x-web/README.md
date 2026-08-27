@@ -174,18 +174,27 @@ Web Audio output channel wants directly, with no reshaping on your side.
 
 #### Views detach when memory grows
 
-A `Float32Array` built over `memory.buffer` stops working — silently, no
-exception, just reads of zero forever — the moment this wasm instance's
-linear memory grows, because the runtime hands the module a new, larger
-`ArrayBuffer` rather than resizing the old one. `ModulePlayer`'s own buffers
-never cause this (`render` never reallocates them), but *another* allocation
-in the same wasm instance can: decoding bytes for a second `ModulePlayer` in
-the same worklet, for one. `wasm-bindgen` cannot stop memory from growing, so
-neither can this package — the fix is the reference check in the example
-above: compare `view.buffer` against a fresh `wasmMemory().buffer`, and
-rebuild the view when they differ. That comparison costs nothing (it is not
-an allocation, just a reference test) and is cheap enough to run on every
-`render` call.
+A `Float32Array` built over `memory.buffer` **detaches** the moment this wasm
+instance's linear memory grows, because the runtime hands the module a new,
+larger `ArrayBuffer` rather than resizing the old one in place. Per the
+`ArrayBuffer` spec, a detached buffer's `byteLength` drops to `0`, and every
+view over it inherits that: `left.length` and `right.length` both become `0`
+too, silently, with no exception. That does not mean "reads of zero forever"
+— it means `left.subarray(0, rendered)` yields an *empty* view, and
+`outputs[0][0].set(...)` with an empty source writes nothing at all to the
+worklet's output. Web Audio pre-zeroes every render quantum's output buffers
+before calling `process()`, so a `set()` that silently writes nothing leaves
+those pre-zeroed buffers exactly as they were — the audible result is
+silence, not garbage, but it is still wrong output from a caller's
+perspective that thinks it just wrote real samples. `ModulePlayer`'s own
+buffers never cause this (`render` never reallocates them), but *another*
+allocation in the same wasm instance can: decoding bytes for a second
+`ModulePlayer` in the same worklet, for one. `wasm-bindgen` cannot stop
+memory from growing, so neither can this package — the fix is the reference
+check in the example above: compare `view.buffer` against a fresh
+`wasmMemory().buffer`, and rebuild the view when they differ. That comparison
+costs nothing (it is not an allocation, just a reference test) and is cheap
+enough to run on every `render` call.
 
 ### Two things worth knowing
 

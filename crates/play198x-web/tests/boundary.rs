@@ -131,9 +131,15 @@ fn an_unknown_format_name_is_an_error_not_a_guess() {
 /// in `format198x-commodore-amiga-mod`), a song length of one order naming
 /// pattern 0, and that one pattern stored as 1024 bytes of all-zero cells.
 /// No samples are used, so the module decodes and plays but is silent
-/// throughout — fine for boundary tests, which check `render`'s shape and
-/// counts, not its audio content. Built in code per this crate's "no media
-/// committed" rule; nothing here is a fixture file.
+/// throughout — fine for tests that check `render`'s shape and counts, not
+/// its audio content. Built in code per this crate's "no media committed"
+/// rule; nothing here is a fixture file.
+///
+/// **Not fine for testing the left/right split.** Every rendered sample is
+/// zero, so `left` and `right` are indistinguishable — a de-interleave that
+/// swapped the two channels would pass every assertion built on this
+/// fixture. See [`synthetic_module_panned_left`] for the fixture that
+/// actually exercises that.
 ///
 /// Layout: a 20-byte title, 31 30-byte sample headers (930 bytes), the
 /// song-length byte (offset 950), the restart byte (951), the 128-byte order
@@ -146,6 +152,81 @@ fn synthetic_module() -> Vec<u8> {
     bytes[1080..1084].copy_from_slice(b"M.K.");
     bytes.extend_from_slice(&[0u8; 1024]); // pattern 0: 64 rows, all-zero cells
     bytes
+}
+
+/// A module with one non-silent note, on channel 0 only — the fixture that
+/// can actually catch a left/right swap in `render`'s de-interleave, which
+/// [`synthetic_module`]'s all-zero content cannot: with no PCM, `left` and
+/// `right` come back identical (both zero) whichever way the two channels
+/// are assigned, so a swap there passes silently.
+///
+/// `play198x_core::engine`'s `PANNING` table hard-pans channel 0 (and 3)
+/// left and channel 1 (and 2) right — ProTracker's fixed Amiga wiring, not
+/// a choice this crate makes. Row 0 here plays C-2 (period 428) on channel 0
+/// against a 64-byte constant-level sample at full volume; channels 1–3
+/// carry no note at all, so they never retrigger and stay silent for the
+/// engine's own reasons, independent of panning. The result the engine
+/// itself guarantees: non-zero output on the left, exact silence on the
+/// right. If `render`'s de-interleave ever swapped `left[i]`/`right[i]`,
+/// this fixture's two assertions would both fail.
+///
+/// Sample 1's header: length 32 words (64 bytes, offset 22..24), volume 64
+/// (offset 25, full scale), no loop (`repeat_start_words`/
+/// `repeat_length_words` left at 0, which `Sample::is_looped` reads as
+/// unlooped). At 48 kHz, C-2 advances the sample position by about 0.173
+/// bytes per output frame (`PAULA_CLOCK_PAL / (2 * 428) / 48_000`), so 128
+/// frames — one render quantum — consume about 22 of the sample's 64 bytes:
+/// comfortably inside it, no loop needed to sustain output for the whole
+/// buffer under test.
+fn synthetic_module_panned_left() -> Vec<u8> {
+    let mut bytes = vec![0u8; 20]; // title: left blank, not under test here
+    for slot in 0..31u8 {
+        let mut header = vec![0u8; 30];
+        if slot == 0 {
+            let sample_len_words: u16 = 32; // 64 bytes of PCM
+            header[22..24].copy_from_slice(&sample_len_words.to_be_bytes());
+            header[25] = 64; // volume: full scale
+        }
+        bytes.extend_from_slice(&header);
+    }
+    bytes.push(1); // song length: one order played
+    bytes.push(0); // restart byte, unread by playback
+    bytes.extend_from_slice(&[0u8; 128]); // order table; order 0 -> pattern 0
+    bytes.extend_from_slice(b"M.K.");
+
+    // Pattern 0: 64 rows * 4 channels * 4 bytes/cell, all zero except row 0's
+    // channel 0 cell, which names sample 1 at period 428 (C-2).
+    let mut pattern = vec![0u8; 64 * 4 * 4];
+    let (period, sample_number) = (428u16, 1u8);
+    pattern[0] = (sample_number & 0xF0) | ((period >> 8) as u8);
+    pattern[1] = (period & 0xFF) as u8;
+    pattern[2] = (sample_number & 0x0F) << 4;
+    bytes.extend_from_slice(&pattern);
+
+    // Sample 1's PCM: a constant, clearly non-zero level (+100 as signed
+    // 8-bit) rather than anything near the noise floor, so there is no
+    // ambiguity about whether the left buffer's non-zero reading is real.
+    bytes.extend_from_slice(&[100u8; 64]);
+    bytes
+}
+
+#[wasm_bindgen_test]
+fn render_puts_a_hard_left_note_in_the_left_buffer_only() {
+    let mut player =
+        play198x_web::ModulePlayer::new(&synthetic_module_panned_left(), 48_000).unwrap();
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    player.render(quantum);
+
+    let left = player.debug_left();
+    let right = player.debug_right();
+    assert!(
+        left.iter().any(|&s| s != 0.0),
+        "channel 0's note must reach the left buffer: {left:?}"
+    );
+    assert!(
+        right.iter().all(|&s| s == 0.0),
+        "channel 0 is panned hard left; the right buffer must stay silent: {right:?}"
+    );
 }
 
 #[wasm_bindgen_test]
