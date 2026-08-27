@@ -45,11 +45,11 @@ image.free();
 ```
 
 `free()` isn't cleanup you can skip. Every object this package hands back —
-`Probed`, `DecodedImage`, `ImageMeta`, `Container` — holds `wasm-bindgen`-managed
-memory on the wasm side, and JavaScript's garbage collector cannot see it: it
-only knows about the small JS object wrapping a pointer, not what that pointer
-holds in linear memory. Call `free()` once you are done with a value, or that
-memory sits until the page unloads.
+`Probed`, `DecodedImage`, `ImageMeta`, `Container`, `ModulePlayer` — holds
+`wasm-bindgen`-managed memory on the wasm side, and JavaScript's garbage
+collector cannot see it: it only knows about the small JS object wrapping a
+pointer, not what that pointer holds in linear memory. Call `free()` once you
+are done with a value, or that memory sits until the page unloads.
 
 ### Metadata, not a reimplementation of it
 
@@ -104,6 +104,45 @@ whole archive's worth of wasm memory per `Container` left unfreed.
 the bytes you hand it, so it cannot undo an oversized `Uint8Array` your own code
 already allocated to build them. Refuse a huge `File` before reading it, rather
 than after.
+
+### Playing a module
+
+`ModulePlayer` wraps a decoded ProTracker module and a running transport. It is
+built for an `AudioWorkletProcessor`: construct it once inside the worklet,
+then call `render` from `process()` with the buffer Web Audio hands you —
+128 samples, called roughly every 2.7 ms at 48 kHz. `render` never allocates,
+so it is safe on that callback.
+
+```js
+import init, { ModulePlayer } from '@play198x/web';
+
+await init();
+
+const bytes = new Uint8Array(await file.arrayBuffer());
+const player = new ModulePlayer(bytes, sampleRate);
+
+// Inside AudioWorkletProcessor.process(inputs, outputs):
+const channel = outputs[0][0]; // mono view; see the note below on layout
+player.render(channel);
+
+// Later, from the main thread via a message to the worklet:
+player.set_playing(false); // pauses; render keeps filling with silence
+player.seek_order(4); // jumps to order 4, clamped to the song's length
+
+console.log(player.order, player.pattern, player.row, player.tick);
+
+player.free();
+```
+
+`render` always fills the buffer you pass it, playing or paused — a paused
+player writes silence rather than returning fewer samples than it was asked
+for, because a starved Web Audio callback clicks. Pause and resume hold the
+song's position and its clock, so resuming continues the row it stopped in.
+
+`render`'s buffer is interleaved stereo (`[left, right, left, right, ...]`),
+matching the engine's own output; a worklet's `process()` callback deals in
+per-channel arrays, so the site wiring the two together is what reshapes one
+into the other — that reshaping is site logic, not this shell's job.
 
 ### Two things worth knowing
 

@@ -345,3 +345,99 @@ impl Container {
             .map_err(|err| JsError::new(&err.to_string()))
     }
 }
+
+/// A playing ProTracker module, wrapped for an `AudioWorkletProcessor`.
+///
+/// The worklet calls [`Self::render`] roughly every 2.7 ms with a 128-sample
+/// buffer it owns — see the spike report this crate's plan cites. That shape
+/// is why `render` takes a caller-owned `&mut [f32]` rather than returning a
+/// `Vec`: the core's [`play198x_core::engine::Engine::render`] is
+/// allocation-free by design (`play198x-core`'s counting-allocator test holds
+/// it to that), and an audio callback that allocates is one that eventually
+/// glitches on somebody else's machine. This shell adds nothing per call
+/// either — it forwards straight into the engine's own buffer.
+#[wasm_bindgen]
+pub struct ModulePlayer {
+    engine: play198x_core::engine::Engine,
+}
+
+#[wasm_bindgen]
+impl ModulePlayer {
+    /// Decode `bytes` as a ProTracker module and start it playing at
+    /// `sample_rate`.
+    ///
+    /// `bytes` is only borrowed for the parse: [`play198x_core::decode::module`]
+    /// copies everything it needs (sample PCM included) into the returned
+    /// `Module`, so nothing here holds a reference into the caller's buffer
+    /// past this call.
+    ///
+    /// # Errors
+    ///
+    /// When the bytes are not a 4-channel ProTracker module — carrying the
+    /// core's own message unchanged.
+    #[wasm_bindgen(constructor)]
+    pub fn new(bytes: &[u8], sample_rate: u32) -> Result<ModulePlayer, JsError> {
+        let module =
+            play198x_core::decode::module(bytes).map_err(|err| JsError::new(&err.to_string()))?;
+        Ok(Self {
+            engine: play198x_core::engine::Engine::new(module, sample_rate),
+        })
+    }
+
+    /// Fill `out` with interleaved stereo samples, returning how many it
+    /// wrote — always `out.len()` rounded down to an even count, whether
+    /// playing or paused.
+    ///
+    /// A paused player still fills `out`, with silence rather than a short
+    /// count: the engine renders exact zeroes for a paused transport (see
+    /// [`play198x_core::engine::Engine::render`]'s own doc), and a worklet
+    /// callback that gets fewer samples than it asked for is a worklet
+    /// callback that clicks. `out.len()` in, an even number back — the core
+    /// works in whole stereo frames, so an odd trailing sample is left
+    /// untouched and not counted.
+    pub fn render(&mut self, out: &mut [f32]) -> usize {
+        self.engine.render(out) * 2
+    }
+
+    /// Start or pause playback. A paused player keeps its position and its
+    /// clock — see [`Self::render`] — so resuming continues the row it
+    /// stopped in rather than restarting the song.
+    pub fn set_playing(&mut self, playing: bool) {
+        self.engine.set_playing(playing);
+    }
+
+    /// Jump to the top of an order, clamped to the song's played prefix.
+    /// Cuts any sounding notes, the way a listener dragging a scrub bar
+    /// expects.
+    pub fn seek_order(&mut self, order: usize) {
+        self.engine.seek_order(order);
+    }
+
+    /// Index into the order table's played prefix.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn order(&self) -> usize {
+        self.engine.position().order
+    }
+
+    /// The pattern the current order names.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn pattern(&self) -> usize {
+        self.engine.position().pattern
+    }
+
+    /// Row within the current pattern, `0..64`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn row(&self) -> usize {
+        self.engine.position().row
+    }
+
+    /// Tick within the current row, `0..speed`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tick(&self) -> u8 {
+        self.engine.position().tick
+    }
+}

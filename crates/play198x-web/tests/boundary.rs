@@ -126,3 +126,67 @@ fn a_wrong_format_is_an_error_carrying_the_decoders_words() {
 fn an_unknown_format_name_is_an_error_not_a_guess() {
     assert!(play198x_web::decode_image(&screen(PAPER_CYAN_INK_BLACK), "jpeg").is_err());
 }
+
+/// A minimal valid ProTracker module: `M.K.` at offset 1080 (`MAGIC_OFFSET`
+/// in `format198x-commodore-amiga-mod`), a song length of one order naming
+/// pattern 0, and that one pattern stored as 1024 bytes of all-zero cells.
+/// No samples are used, so the module decodes and plays but is silent
+/// throughout — fine for boundary tests, which check `render`'s shape and
+/// counts, not its audio content. Built in code per this crate's "no media
+/// committed" rule; nothing here is a fixture file.
+///
+/// Layout: a 20-byte title, 31 30-byte sample headers (930 bytes), the
+/// song-length byte (offset 950), the restart byte (951), the 128-byte order
+/// table (952..1080), then the 4-byte magic — 1084 bytes total, exactly
+/// `format198x_commodore_amiga_mod`'s documented header size.
+fn synthetic_module() -> Vec<u8> {
+    let mut bytes = vec![0u8; 1084];
+    bytes[950] = 1; // song length: one order played
+    // order_table[0] is already 0, naming pattern 0 — no jump needed.
+    bytes[1080..1084].copy_from_slice(b"M.K.");
+    bytes.extend_from_slice(&[0u8; 1024]); // pattern 0: 64 rows, all-zero cells
+    bytes
+}
+
+#[wasm_bindgen_test]
+fn a_player_renders_the_frames_it_is_asked_for() {
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let mut buffer = vec![0.0f32; 1024];
+    assert_eq!(player.render(&mut buffer), 1024);
+}
+
+#[wasm_bindgen_test]
+fn a_paused_player_renders_silence_rather_than_stopping() {
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    player.set_playing(false);
+    let mut buffer = vec![1.0f32; 256];
+    let rendered = player.render(&mut buffer);
+    assert_eq!(rendered, 256, "a paused player still fills its buffer");
+    assert!(
+        buffer.iter().all(|&s| s == 0.0),
+        "and fills it with silence"
+    );
+}
+
+#[wasm_bindgen_test]
+fn bytes_that_are_not_a_module_are_an_error_not_a_guess() {
+    assert!(play198x_web::ModulePlayer::new(&screen(PAPER_CYAN_INK_BLACK), 48_000).is_err());
+}
+
+#[wasm_bindgen_test]
+fn a_fresh_player_starts_at_the_top_of_the_order_table() {
+    let player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    assert_eq!(player.order(), 0);
+    assert_eq!(player.pattern(), 0);
+    assert_eq!(player.row(), 0);
+    assert_eq!(player.tick(), 0);
+}
+
+#[wasm_bindgen_test]
+fn seek_order_clamps_to_the_songs_played_prefix() {
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    // The synthetic module plays exactly one order (song length 1), so any
+    // order past that clamps back to the last playable one, order 0.
+    player.seek_order(99);
+    assert_eq!(player.order(), 0);
+}
