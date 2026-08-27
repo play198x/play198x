@@ -116,7 +116,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: wasm32-unknown-unknown
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -138,6 +138,12 @@ jobs:
 
       - name: Clippy the shell
         run: cargo clippy --manifest-path crates/play198x-web/Cargo.toml --all-targets -- -D warnings
+
+      # `cargo fmt --all --check` in the `fmt` job only sees workspace members,
+      # and this crate is excluded from the workspace — so without this step
+      # it has no formatting gate at all.
+      - name: Check shell formatting
+        run: cargo fmt --manifest-path crates/play198x-web/Cargo.toml --check
 
       # Both targets are built so the browser target cannot rot: it has no
       # consumer yet, and nothing else would notice it breaking.
