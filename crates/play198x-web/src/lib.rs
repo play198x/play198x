@@ -157,3 +157,82 @@ pub fn decode_image(bytes: &[u8], format: &str) -> Result<DecodedImage, JsError>
         .map(|inner| DecodedImage { inner })
         .map_err(|err| JsError::new(&err.to_string()))
 }
+
+/// What a decoded picture says about itself, flattened for JavaScript.
+///
+/// Exists so a shell never has to re-derive this from [`DecodedImage`]'s raw
+/// fields. Before this method existed, `@play198x/web`'s one browser
+/// consumer mapped `format` to a display label, combined `width`/`height`
+/// into a dimensions string, and rendered `palette` as swatches — in
+/// JavaScript, a second copy of logic that already lives in
+/// `play198x_core::metadata::image_meta`. A shell is bytes in, data out; the
+/// site's copy could only ever drift from this one, so this method replaces
+/// it rather than sitting beside it.
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct ImageMeta {
+    inner: play198x_core::metadata::ImageMeta,
+}
+
+#[wasm_bindgen]
+impl ImageMeta {
+    /// One of `scr`, `koala`, `art-studio`, `ilbm`, `protracker` — the same
+    /// names [`probe`] and [`decode_image`] use.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn format(&self) -> String {
+        format_name(self.inner.format).to_owned()
+    }
+
+    /// Width in mode pixels — not display pixels. See `DecodedImage`'s
+    /// `pixel_aspect_w`/`pixel_aspect_h` for the shape of one mode pixel.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.inner.width
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.inner.height
+    }
+
+    /// The picture's colours in hardware index order, flattened to RGB
+    /// triples — identical in shape to [`DecodedImage::palette`]. Repeated
+    /// here so a caller that only wants the metadata (a file list, a
+    /// thumbnail strip) is never forced to keep the whole decoded image
+    /// around just to read its swatches.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn palette(&self) -> Vec<u8> {
+        self.inner
+            .palette
+            .iter()
+            .flat_map(|&(r, g, b)| [r, g, b])
+            .collect()
+    }
+
+    /// The container path the bytes came from — caller-supplied (an
+    /// [`Entry::path`](play198x_core::container::Entry::path), or a plain
+    /// file's own name) and passed through unchanged. Not sanitised: see
+    /// that field's own warning before using it as anything other than a
+    /// display string.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn source(&self) -> String {
+        self.inner.source.clone()
+    }
+}
+
+#[wasm_bindgen]
+impl DecodedImage {
+    /// What this picture says about itself, for `source` — the path or name
+    /// it was read from, since a decoded image does not know that on its own.
+    #[must_use]
+    pub fn metadata(&self, source: &str) -> ImageMeta {
+        ImageMeta {
+            inner: play198x_core::metadata::image_meta(&self.inner, source),
+        }
+    }
+}

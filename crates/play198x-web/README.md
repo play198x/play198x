@@ -42,6 +42,22 @@ canvas.getContext('2d').putImageData(
 );
 ```
 
+### Metadata, not a reimplementation of it
+
+`DecodedImage.metadata(source)` reports the same facts a file browser or a
+thumbnail strip wants — format, dimensions, palette — plus the `source` string
+you pass it, for display. Read it from here rather than re-deriving a label,
+a dimensions string, or swatches from `width`/`height`/`format`/`palette`
+yourselves: this is the one place that logic is allowed to live, and a second
+copy can only drift from it.
+
+```js
+const image = decode_image(bytes, found.format);
+const meta = image.metadata(file.name);
+
+console.log(meta.format, `${meta.width}×${meta.height}`, meta.source);
+```
+
 ### Two things worth knowing
 
 **`confidence` is not decoration.** `probe` returns `certain` or `probable`. A
