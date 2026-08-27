@@ -110,9 +110,15 @@ fn the_palette_crosses_whole_and_in_hardware_order() {
 fn a_wrong_format_is_an_error_carrying_the_decoders_words() {
     let err = play198x_web::decode_image(&screen(PAPER_CYAN_INK_BLACK), "koala").unwrap_err();
     let message = format!("{err:?}");
+    // Not just non-empty — a non-empty string including one the shell
+    // invented would still pass that. "decoder rejected the bytes" is
+    // `play198x_core::Error::Decode`'s own Display wording (`lib.rs`: "the
+    // {format:?} decoder rejected the bytes: {what}"), unchanged by the shell
+    // per the boundary's contract ("errors carry play198x_core::Error's own
+    // message unchanged — the shell invents no wording of its own").
     assert!(
-        !message.is_empty(),
-        "the error must say something: {message}"
+        message.contains("decoder rejected the bytes"),
+        "the error must carry the core's own wording, not just any text: {message}"
     );
 }
 
