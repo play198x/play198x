@@ -39,7 +39,7 @@ zip = { version = "8", default-features = false, features = [
 # and the like) that are Amiga media but not raw sector images. Earlier
 # releases fold both into "corrupt", which is the mistake this task exists to
 # avoid making downstream.
-format198x-commodore-amiga-adf = "0.2.3"
+format198x-commodore-amiga-adf = "0.3.0"
 # PowerPacked files decrunch on the way out of `read`, whatever container they
 # arrived in, so the dependency belongs to the container layer rather than the
 # decoders.
