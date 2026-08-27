@@ -12,8 +12,20 @@
 //! | ProTracker | a recognised magic at offset 1080 | [`Confidence::Certain`] |
 //! | ILBM | `FORM` at 0 and `ILBM` at 8 | [`Confidence::Certain`] |
 //! | Koala | load address `0x6000` **and** length 10,003 | [`Confidence::Certain`] |
-//! | Art Studio | load address `0x2000` **and** length 9,002..=9,009 | [`Confidence::Certain`] |
+//! | Art Studio | load address `0x2000` **and** length 9,002..=9,009 | [`Confidence::Probable`] |
 //! | SCR | length exactly 6,912, and nothing above matched | [`Confidence::Probable`] |
+//!
+//! **What separates the two halves of that table is whether a miss can be
+//! caught.** The three certain formats carry a magic number or a checksum, so
+//! bytes that are not one of them fail to match rather than matching wrongly.
+//! The two probable ones have neither: a load address and a length are the
+//! whole signal, and plenty of files that are not Art Studio bitmaps begin
+//! `0x2000` and run to 9,009 bytes.
+//!
+//! That is the fact a caller needs. A wrong `Probable` does not surface as an
+//! error — the decoder accepts the bytes and produces a picture that simply
+//! looks wrong — so an interface built on this should say when an
+//! identification is weak rather than presenting it as settled.
 //!
 //! The order is the substance, not an implementation detail. SCR is identified
 //! by its length and nothing else, so it must be tried last: an ILBM or a
