@@ -1,0 +1,123 @@
+# Publish the browser build of play198x-web to npm as @play198x/web.
+#
+# The crate itself is publish = false on crates.io — a #[wasm_bindgen] surface
+# returning JavaScript values has no Rust caller. What is worth publishing is the
+# *built* artefact, which is an npm-shaped thing, and which two Astro sites would
+# otherwise each run a Rust toolchain to rebuild identically.
+#
+# Secretless, via npm's trusted publishing (OIDC). There is no NPM_TOKEN here and
+# there must not be one: the whole point is that a compromised repository secret
+# cannot publish, because there is no secret to compromise.
+#
+# THE FIRST PUBLISH OF THIS PACKAGE WAS MANUAL, AND HAD TO BE. npm configures a
+# trusted publisher in the *package's* settings, and a package with no versions
+# has no settings — the same bootstrap trap crates.io has. One granular token,
+# one `npm publish`, then the trusted publisher, then the token deleted. PyPI
+# allows configuring OIDC before a package exists; npm and crates.io do not.
+name: npm
+
+on:
+  # Explicit, and matching the family's tag shape. Publishing on every push to
+  # main would put a version on a public registry for every merged pull request.
+  push:
+    tags:
+      - "play198x-web-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish @play198x/web
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Mandatory for trusted publishing: this is what mints the OIDC token npm
+      # exchanges for publish rights.
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: echo "channel=$(grep '^channel' rust-toolchain.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/play198x-web
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      # registry-url is what writes the .npmrc that `npm publish` reads.
+      # package-manager-cache is off because this repository has no lockfile for
+      # setup-node to key a cache on, and a cache keyed on nothing is worse than
+      # none.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      # Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0. Node 24 ships
+      # a new enough npm today, and this fails loudly on the day it does not
+      # rather than falling back to asking for a token that does not exist.
+      - name: Check npm is new enough to publish without a token
+        run: |
+          set -euo pipefail
+          node --version
+          required=11.5.1
+          actual="$(npm --version)"
+          # sort -V puts the lower version first; if that is not the floor, the
+          # installed npm is below it.
+          if [ "$(printf '%s\n%s\n' "$required" "$actual" | sort -V | head -1)" != "$required" ]; then
+            echo "::error::npm $actual cannot use trusted publishing; $required is the floor"
+            exit 1
+          fi
+          echo "npm $actual is new enough"
+
+      - name: Build the browser target
+        run: wasm-pack build crates/play198x-web --target web --out-dir pkg-web
+
+      # wasm-pack derives the package name from the crate name, so --scope would
+      # emit @play198x/play198x-web. The scope already carries the org, so the
+      # name does not repeat it — see 198x/decisions/crate-naming.md, amended
+      # 2026-08-27 for scoped registries.
+      - name: Name the package
+        run: npm pkg set name=@play198x/web
+        working-directory: crates/play198x-web/pkg-web
+
+      # A tag that disagrees with the manifest publishes a version nobody asked
+      # for under a name that says otherwise. Cheaper to catch here than to yank.
+      - name: The tag and the manifest must agree
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#play198x-web-v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${tag_version}, the package says ${pkg_version}"
+            exit 1
+          fi
+          echo "tag and package agree on ${pkg_version}"
+        working-directory: crates/play198x-web/pkg-web
+
+      # --access public because a scoped package defaults to restricted, and a
+      # restricted publish on a free account fails rather than publishing
+      # privately. Provenance is attached automatically under trusted publishing
+      # from a public repository — no --provenance flag needed.
+      - name: Publish
+        run: npm publish --access public
+        working-directory: crates/play198x-web/pkg-web
