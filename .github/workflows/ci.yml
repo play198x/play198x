@@ -133,6 +133,21 @@ jobs:
       # the `wasm-bindgen-test-runner` harness, which needs the wasm32 target.
       # `wasm-pack test` wires both up, so this is the form that actually
       # executes `tests/boundary.rs` rather than reporting a false green.
+      # The shell crate is excluded from the workspace, so it carries its OWN
+      # Cargo.lock — and nothing updates it when a workspace dependency moves.
+      # Measured 2026-08-27: the ADF fix from #7 reached play198x-core and did
+      # not reach here, leaving the published browser decoder still reporting
+      # ordinary Amiga data disks as corrupt. Both crates built, every test
+      # passed, and the only sign was a dirty lockfile after a local build.
+      - name: The shell's lockfile must not lag its dependencies
+        run: |
+          set -euo pipefail
+          cargo fetch --manifest-path crates/play198x-web/Cargo.toml --locked || {
+            echo "::error::crates/play198x-web/Cargo.lock is stale — run: cargo update --manifest-path crates/play198x-web/Cargo.toml"
+            exit 1
+          }
+          git diff --exit-code crates/play198x-web/Cargo.lock
+
       - name: Test the shell
         run: wasm-pack test --node crates/play198x-web
 
