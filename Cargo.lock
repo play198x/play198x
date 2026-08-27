@@ -41,9 +41,9 @@ dependencies = [
 
 [[package]]
 name = "format198x-commodore-amiga-adf"
-version = "0.2.3"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa5c490cac5afcf6a1100cca07689d78191478756909e19c98a3f5b4cf56e6d"
+checksum = "8a678aefa033ad667e40c1655f2fcbe0aa2e5d4d0a706eff60a92f08a479eb62"
 
 [[package]]
 name = "format198x-commodore-amiga-ilbm"
