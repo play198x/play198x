@@ -245,6 +245,7 @@ impl DecodedImage {
 /// not depend on, so index-based accessors are what the boundary can express
 /// without a new dependency.
 #[wasm_bindgen]
+#[derive(Debug)]
 pub struct Container {
     inner: play198x_core::container::Container,
     // Computed once, in `new`, rather than on every accessor call: a ZIP's

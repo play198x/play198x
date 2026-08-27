@@ -32,6 +32,7 @@ const found = probe(bytes);
 if (!found) throw new Error('not a format this recognises');
 
 const image = decode_image(bytes, found.format);
+found.free();
 
 const canvas = document.querySelector('canvas');
 canvas.width = image.width;
@@ -40,7 +41,15 @@ canvas.getContext('2d').putImageData(
   new ImageData(new Uint8ClampedArray(image.rgba), image.width, image.height),
   0, 0,
 );
+image.free();
 ```
+
+`free()` isn't cleanup you can skip. Every object this package hands back —
+`Probed`, `DecodedImage`, `ImageMeta`, `Container` — holds `wasm-bindgen`-managed
+memory on the wasm side, and JavaScript's garbage collector cannot see it: it
+only knows about the small JS object wrapping a pointer, not what that pointer
+holds in linear memory. Call `free()` once you are done with a value, or that
+memory sits until the page unloads.
 
 ### Metadata, not a reimplementation of it
 
@@ -56,6 +65,8 @@ const image = decode_image(bytes, found.format);
 const meta = image.metadata(file.name);
 
 console.log(meta.format, `${meta.width}×${meta.height}`, meta.source);
+meta.free();
+image.free();
 ```
 
 ### Opening archives and disk images
@@ -77,11 +88,17 @@ for (let i = 0; i < container.entry_count; i++) {
 }
 
 const moduleBytes = container.read('mod.title_tune');
+container.free();
 ```
 
 A plain file — not a ZIP, not an ADF — is a `Container` of exactly one entry,
 named by `file.name`. `entry_path`/`entry_len` return `undefined` past the last
 index, and `read` throws when no entry answers to the name given.
+
+Call `free()` on it the same as any other value from this package — and mean
+it here especially: a `Container` is sized for up to 64 MiB, and a visitor
+opening several archives in a session (the music-disk case above) leaks one
+whole archive's worth of wasm memory per `Container` left unfreed.
 
 **Check `file.size` before this.** `Container`'s constructor takes ownership of
 the bytes you hand it, so it cannot undo an oversized `Uint8Array` your own code
