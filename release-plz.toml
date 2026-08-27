@@ -2,8 +2,10 @@
 #
 # On each push to main, release-plz opens (or updates) a "chore: release" PR
 # (version bump + CHANGELOG from conventional-commit prefixes). Merging it makes
-# release-plz.yml tag the crate and publish it to crates.io — no PAT, no stored
-# registry token.
+# release-plz.yml tag the crate and publish it to crates.io — no stored registry
+# token; publishing goes over Trusted Publishing. The workflow does want a PAT,
+# but only so the release PR gets CI: a branch pushed by GITHUB_TOKEN triggers
+# no workflows. See the note in .github/workflows/release-plz.yml.
 #
 # git_only is deliberately NOT set. It takes a crate's baseline from its git tag
 # instead of the registry, and exists for crates that are never published and so
