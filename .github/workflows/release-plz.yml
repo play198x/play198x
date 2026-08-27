@@ -69,8 +69,96 @@ jobs:
       # with crates-io-auth-action and a CARGO_REGISTRY_TOKEN is what release-plz
       # documents *not* to do, so there is no separate auth or publish step here.
       - name: Run release-plz (tag and publish merged releases)
+        id: release
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # Announce the release in Discord. Every crate released in this run goes
+      # into a single message rather than one post per crate: versioning here is
+      # per-package, so a normal cycle releases several at once and a post each
+      # would bury the channel.
+      #
+      # Reads DISCORD_RELEASE_WEBHOOK (org-level secret). Absent, the step logs
+      # and succeeds — a missing notification must not fail a release that has
+      # already published to crates.io.
+      - name: Announce the release in Discord
+        if: steps.release.outputs.releases_created == 'true'
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          WEBHOOK_ALL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_ALL }}
+          RELEASES: ${{ steps.release.outputs.releases }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+
+          # Post to this project's own channel and, when set, an aggregate
+          # channel carrying every repo. Built with `if` rather than
+          # `[ -n "$x" ] && arr+=(...)`: under `set -e` a failing test at the end
+          # of a command list exits the step, so the shorter form would abort
+          # whenever a secret is unset — the normal case this tolerates.
+          targets=()
+          if [ -n "${WEBHOOK}" ]; then
+            targets+=("$WEBHOOK")
+          fi
+          # Skip an aggregate pointed at the same channel, so a single-channel
+          # setup that fills both secrets does not post twice.
+          if [ -n "${WEBHOOK_ALL}" ] && [ "${WEBHOOK_ALL}" != "${WEBHOOK}" ]; then
+            targets+=("$WEBHOOK_ALL")
+          fi
+
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo "::notice::no Discord webhook secret set — nothing posted."
+            exit 0
+          fi
+
+          count=$(jq 'length' <<<"$RELEASES")
+          if [ "$count" = "0" ]; then
+            echo "::notice::no releases in this run — nothing posted."
+            exit 0
+          fi
+
+          # One embed field per crate, each linking to its own GitHub Release.
+          # Built with jq throughout so crate names and versions are escaped
+          # rather than pasted into a hand-written JSON string.
+          jq -n \
+            --argjson releases "$RELEASES" \
+            --arg repo "$REPO" \
+            --arg base "${SERVER_URL}/${REPO}/releases/tag" \
+            --arg title "$( [ "$count" = "1" ] && echo "play198x — 1 crate released" || echo "play198x — ${count} crates released" )" \
+            '{
+               username: "198x releases",
+               embeds: [{
+                 title: $title,
+                 url: ($base + "/" + ($releases[0].tag // ($releases[0].package_name + "-v" + $releases[0].version))),
+                 color: 3066993,
+                 fields: ($releases | map({
+                   name: (.package_name + " v" + .version),
+                   value: ("[release notes](" + $base + "/" + (.tag // (.package_name + "-v" + .version)) + ") · [crates.io](https://crates.io/crates/" + .package_name + "/" + .version + ")"),
+                   inline: false
+                 })),
+                 footer: { text: $repo }
+               }]
+             }' > payload.json
+
+          # Every target is attempted even if an earlier one fails, so a stale
+          # aggregate URL cannot hide a successful post to the project channel.
+          failed=0
+          for target in "${targets[@]}"; do
+            if ! curl --silent --show-error --fail-with-body \
+                      --retry 3 --retry-delay 5 --retry-all-errors \
+                      -H "Content-Type: application/json" \
+                      -X POST -d @payload.json "$target"; then
+              failed=1
+            fi
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::at least one Discord post failed; see the output above."
+            exit 1
+          fi
+
+          echo "Announced ${count} crate(s) to Discord."
