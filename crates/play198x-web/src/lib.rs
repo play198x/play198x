@@ -236,3 +236,111 @@ impl DecodedImage {
         }
     }
 }
+
+/// One entry inside an opened [`Container`], flattened for JavaScript.
+///
+/// [`Container::entry_path`] and [`Container::entry_len`] hand these fields
+/// back individually rather than as a struct: `wasm-bindgen` cannot return a
+/// `Vec` of a `#[wasm_bindgen]` type without `js-sys`, which this crate does
+/// not depend on, so index-based accessors are what the boundary can express
+/// without a new dependency.
+#[wasm_bindgen]
+pub struct Container {
+    inner: play198x_core::container::Container,
+    // Computed once, in `new`, rather than on every accessor call: a ZIP's
+    // `entries()` re-parses its whole central directory, and an ADF's walks
+    // the disk's directory tree. Caching means a visitor clicking through an
+    // 880K disk's tunes pays that cost once, at open, not once per click.
+    entries: Vec<play198x_core::container::Entry>,
+}
+
+#[wasm_bindgen]
+impl Container {
+    /// Open `bytes` — a plain file, a ZIP archive, or an Amiga disk image,
+    /// decided from the bytes themselves, exactly as
+    /// [`play198x_core::container::Container::from_bytes`] decides it.
+    /// `name` is the browser's `File.name`; it becomes the sole entry's name
+    /// if the bytes turn out to be a plain file, and is passed through
+    /// unsanitised — see [`Entry::path`](play198x_core::container::Entry::path).
+    ///
+    /// Parses the archive once, here, and keeps both the opened container and
+    /// its entry list resident for the methods below. The alternative —
+    /// two free functions, `open_container(bytes)` and
+    /// `read_entry(bytes, index)` — would force every entry read to re-send
+    /// the whole archive's bytes across the `wasm-bindgen` boundary and
+    /// re-validate them from scratch, which is the wrong cost to pay on every
+    /// click through a disk's tunes. This struct pays the copy-in and the
+    /// parse once, at construction, and every method after that is `&self`.
+    ///
+    /// Ownership: `bytes: Vec<u8>` is copied out of the JavaScript
+    /// `Uint8Array` by `wasm-bindgen` before this function runs, so the
+    /// `Vec` — and the [`play198x_core::container::Container`] built over it
+    /// — is owned outright. Nothing here borrows from JavaScript memory, so
+    /// there is nothing that can dangle if the caller's buffer is dropped,
+    /// detached, or reused the moment this call returns.
+    ///
+    /// # Errors
+    ///
+    /// When the bytes are too large, or turn out to be a damaged or
+    /// unsupported archive or disk image — carrying the core's own message
+    /// unchanged.
+    #[wasm_bindgen(constructor)]
+    pub fn new(bytes: Vec<u8>, name: &str) -> Result<Container, JsError> {
+        let inner = play198x_core::container::Container::from_bytes(bytes, name)
+            .map_err(|err| JsError::new(&err.to_string()))?;
+        let entries = inner
+            .entries()
+            .map_err(|err| JsError::new(&err.to_string()))?;
+        Ok(Self { inner, entries })
+    }
+
+    /// How many entries the container holds.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn entry_count(&self) -> u32 {
+        // usize is 32-bit on the wasm32 target this crate builds for, and the
+        // core's own caps (an archive of at most 64 MiB; a disk of at most
+        // `MAX_DISK_ENTRIES` headers) keep the real count far below `u32::MAX`
+        // regardless.
+        self.entries.len() as u32
+    }
+
+    /// The entry's name at `index`, exactly as the container states it and
+    /// **not sanitised** — see
+    /// [`Entry::path`](play198x_core::container::Entry::path). `undefined`
+    /// in JavaScript once `index` reaches [`Self::entry_count`].
+    #[must_use]
+    pub fn entry_path(&self, index: u32) -> Option<String> {
+        self.entries
+            .get(index as usize)
+            .map(|entry| entry.path.clone())
+    }
+
+    /// How many bytes reading the entry at `index` yields, before any
+    /// PowerPacker decrunching [`Self::read`] does on the way out.
+    /// `undefined` in JavaScript once `index` reaches [`Self::entry_count`].
+    ///
+    /// A `number`, not the exact byte count past 2^53: JavaScript has no
+    /// 64-bit integer here, and the core's own per-entry cap
+    /// (`MAX_ENTRY_LEN`, 16 MiB) sits so far under that ceiling this can
+    /// never lose precision on anything this crate will actually read.
+    #[must_use]
+    pub fn entry_len(&self, index: u32) -> Option<f64> {
+        self.entries
+            .get(index as usize)
+            .map(|entry| entry.len as f64)
+    }
+
+    /// Read one entry's bytes by name, decrunched if it arrived PowerPacked.
+    ///
+    /// # Errors
+    ///
+    /// When no entry answers to `path`, or the container turns out to be
+    /// damaged in a way only a read discovers — carrying the core's own
+    /// message unchanged.
+    pub fn read(&self, path: &str) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .read(path)
+            .map_err(|err| JsError::new(&err.to_string()))
+    }
+}

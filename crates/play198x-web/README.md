@@ -58,6 +58,36 @@ const meta = image.metadata(file.name);
 console.log(meta.format, `${meta.width}×${meta.height}`, meta.source);
 ```
 
+### Opening archives and disk images
+
+A visitor drops a ZIP or an Amiga ADF disk image, not a single file. `Container`
+opens it once and keeps it open, so clicking through several entries — a music
+disk's tunes — never re-sends or re-parses the whole archive per click:
+
+```js
+import init, { Container } from '@play198x/web';
+
+await init();
+
+const bytes = new Uint8Array(await file.arrayBuffer());
+const container = new Container(bytes, file.name);
+
+for (let i = 0; i < container.entry_count; i++) {
+  console.log(container.entry_path(i), container.entry_len(i));
+}
+
+const moduleBytes = container.read('mod.title_tune');
+```
+
+A plain file — not a ZIP, not an ADF — is a `Container` of exactly one entry,
+named by `file.name`. `entry_path`/`entry_len` return `undefined` past the last
+index, and `read` throws when no entry answers to the name given.
+
+**Check `file.size` before this.** `Container`'s constructor takes ownership of
+the bytes you hand it, so it cannot undo an oversized `Uint8Array` your own code
+already allocated to build them. Refuse a huge `File` before reading it, rather
+than after.
+
 ### Two things worth knowing
 
 **`confidence` is not decoration.** `probe` returns `certain` or `probable`. A
