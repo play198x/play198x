@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/play198x/play198x/compare/play198x-core-v0.1.0...play198x-core-v0.1.1) - 2026-08-27
+
+### Fixed
+
+- *(deps)* take the ADF fix that stops ordinary data disks reading as corrupt ([#7](https://github.com/play198x/play198x/pull/7))
+
 ## [0.1.0](https://github.com/play198x/play198x/releases/tag/play198x-core-v0.1.0) - 2026-08-26
 
 ### Added
