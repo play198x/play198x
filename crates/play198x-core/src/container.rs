@@ -93,8 +93,16 @@ pub struct Entry {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Container {
-    /// A file on disk, holding one entry named by its basename.
+    /// A file on disk, holding one entry named by its basename. Loaded lazily
+    /// — see [`Self::open`] — so this variant never holds the file's bytes.
     Plain(PathBuf),
+    /// A plain file's bytes, already resident, holding one entry named by the
+    /// caller rather than by a basename. [`Self::Plain`] cannot represent
+    /// this: it names a path to reopen on demand, and a caller building this
+    /// variant — the wasm build handed a browser `File`'s bytes, which is the
+    /// case this exists for — has no path at all, only the name the browser
+    /// reported and the bytes themselves. Built by [`Self::from_bytes`].
+    PlainBytes(String, Vec<u8>),
     /// The whole archive, in memory. A `ZipArchive` is built over a cursor per
     /// call rather than held, so `read` needs only `&self` and no interior
     /// mutability — the access pattern is a handful of entries, not a stream.
@@ -137,40 +145,70 @@ impl Container {
             .take(SIGNATURE_LEN as u64)
             .read_to_end(&mut signature)?;
 
-        // Known gap, deliberately left: a self-extracting archive begins with
-        // an executable stub, so these four bytes send it down the plain-file
-        // path even though `zip::ZipArchive::new` would parse it — a ZIP is
-        // found from its tail, not its head. SFX `.exe` archives are common
-        // for this material. Catching them means a tail scan for
-        // `PK\x05\x06`, which is new capability rather than a fix, and
-        // belongs beside `probe`.
-        if is_zip(&signature) {
-            // Parse once and discard: this is the check, not the read.
-            let bytes = whole(&mut file, path, len)?;
-            archive(&bytes)?;
-            return Ok(Self::Zip(bytes));
-        }
-
-        if len == ADF_HD_LEN {
+        match sniff(&signature, len) {
+            Sniffed::Zip => {
+                // Parse once and discard: this is the check, not the read.
+                let bytes = whole(&mut file, path, len)?;
+                archive(&bytes)?;
+                Ok(Self::Zip(bytes))
+            }
             // The reader has an Amiga disk image; say so, rather than let it
             // reach the ADF crate and come back as a complaint about size.
             // High-density images are real media this crate cannot yet read,
             // which is a different fact from a damaged disk.
-            return Err(Error::UnsupportedContainer {
-                format: "HD ADF".to_owned(),
-                detail: "a 1.76 MB high-density Amiga disk image".to_owned(),
-            });
+            Sniffed::AdfHd => Err(hd_adf_unsupported()),
+            Sniffed::Adf => {
+                // Validated here, like an archive, so a disk that turns out to
+                // carry no filesystem is reported where the caller named the
+                // file.
+                let bytes = whole(&mut file, path, len)?;
+                Disk::open(&bytes).map_err(from_adf)?;
+                Ok(Self::Adf(bytes))
+            }
+            Sniffed::Plain => Ok(Self::Plain(path.to_path_buf())),
+        }
+    }
+
+    /// Build a container from bytes already resident in memory, for a caller
+    /// with no filesystem to hand [`Self::open`] a path — the wasm build,
+    /// given a browser `File`'s bytes directly, is the case this exists for.
+    ///
+    /// `name` becomes the sole entry's [`Entry::path`] if the bytes turn out
+    /// to be a plain file, exactly the role a path's basename plays for
+    /// [`Self::open`]. It is exactly as untrusted: a browser's `File.name` is
+    /// caller-supplied and is passed through verbatim, per the warning on
+    /// [`Entry::path`] — never sanitised, joined onto a directory, or written
+    /// by this crate.
+    ///
+    /// The decision of what the bytes are is the same one `open` makes from a
+    /// signature and a length, so both share it. What differs is the cost:
+    /// `open` sniffs before loading specifically to avoid pulling a whole disk
+    /// image into memory only to throw it away, and that is a cost this
+    /// function cannot avoid, because the bytes are already resident by the
+    /// time it is called — there is nothing left to defer. What still applies
+    /// is [`MAX_ARCHIVE_LEN`], checked before any sniffing or parsing runs,
+    /// for the same reason it gates `open`: a `Vec::with_capacity` of a
+    /// hostile size is an allocation that aborts the process rather than
+    /// unwinding, and a browser tab is exactly where somebody drops a 400 MB
+    /// ZIP.
+    pub fn from_bytes(bytes: Vec<u8>, name: &str) -> Result<Self, Error> {
+        let len = bytes.len() as u64;
+        if len > MAX_ARCHIVE_LEN {
+            return Err(too_large(name, len, MAX_ARCHIVE_LEN));
         }
 
-        if len == ADF_DD_LEN {
-            // Validated here, like an archive, so a disk that turns out to
-            // carry no filesystem is reported where the caller named the file.
-            let bytes = whole(&mut file, path, len)?;
-            Disk::open(&bytes).map_err(from_adf)?;
-            return Ok(Self::Adf(bytes));
+        match sniff(&bytes, len) {
+            Sniffed::Zip => {
+                archive(&bytes)?;
+                Ok(Self::Zip(bytes))
+            }
+            Sniffed::AdfHd => Err(hd_adf_unsupported()),
+            Sniffed::Adf => {
+                Disk::open(&bytes).map_err(from_adf)?;
+                Ok(Self::Adf(bytes))
+            }
+            Sniffed::Plain => Ok(Self::PlainBytes(name.to_owned(), bytes)),
         }
-
-        Ok(Self::Plain(path.to_path_buf()))
     }
 
     /// Every entry the container holds, in the order it holds them.
@@ -183,6 +221,10 @@ impl Container {
             Self::Plain(path) => Ok(vec![Entry {
                 path: basename(path)?.to_owned(),
                 len: std::fs::metadata(path)?.len(),
+            }]),
+            Self::PlainBytes(name, bytes) => Ok(vec![Entry {
+                path: name.clone(),
+                len: bytes.len() as u64,
             }]),
             Self::Zip(bytes) => {
                 let mut archive = archive(bytes)?;
@@ -265,6 +307,20 @@ impl Container {
                 let mut file = std::fs::File::open(path)?;
                 let len = file.metadata()?.len();
                 bounded(&mut file, entry, len, MAX_ENTRY_LEN)
+            }
+            Self::PlainBytes(name, bytes) => {
+                if entry != name {
+                    return Err(missing(entry));
+                }
+                // Resident already, so there is nothing to read — only the
+                // same entry cap [`Self::Plain`] applies via `bounded`, kept
+                // here so `read` never hands back more than `MAX_ENTRY_LEN`
+                // regardless of which variant answered it.
+                let declared = bytes.len() as u64;
+                if declared > MAX_ENTRY_LEN {
+                    return Err(too_large(entry, declared, MAX_ENTRY_LEN));
+                }
+                Ok(bytes.clone())
             }
             Self::Zip(bytes) => {
                 let mut archive = archive(bytes)?;
@@ -429,6 +485,50 @@ fn join(dir: &str, name: &str) -> String {
         name.to_owned()
     } else {
         format!("{dir}/{name}")
+    }
+}
+
+/// What a signature and a length identify a container as — the decision
+/// [`Container::open`] and [`Container::from_bytes`] both make, from
+/// different starting points. `open` reads only [`SIGNATURE_LEN`] bytes off
+/// the front of the file before it decides whether to load the rest;
+/// `from_bytes` already holds the whole thing and passes it through
+/// unsliced. Either works, because [`is_zip`] only ever looks at the first
+/// four bytes regardless of how much more is behind them.
+///
+/// Known gap, deliberately left: a self-extracting archive begins with an
+/// executable stub, so these four bytes send it down the plain-file path
+/// even though `zip::ZipArchive::new` would parse it — a ZIP is found from
+/// its tail, not its head. SFX `.exe` archives are common for this material.
+/// Catching them means a tail scan for `PK\x05\x06`, which is new capability
+/// rather than a fix, and belongs beside `probe`.
+enum Sniffed {
+    Zip,
+    /// A high-density Amiga disk image: real media this crate cannot yet
+    /// read. A typed error, not a variant — see [`hd_adf_unsupported`].
+    AdfHd,
+    Adf,
+    Plain,
+}
+
+fn sniff(signature: &[u8], len: u64) -> Sniffed {
+    if is_zip(signature) {
+        Sniffed::Zip
+    } else if len == ADF_HD_LEN {
+        Sniffed::AdfHd
+    } else if len == ADF_DD_LEN {
+        Sniffed::Adf
+    } else {
+        Sniffed::Plain
+    }
+}
+
+/// The typed error for a high-density Amiga disk image, shared by `open` and
+/// `from_bytes` so the format name and detail can only drift in one place.
+fn hd_adf_unsupported() -> Error {
+    Error::UnsupportedContainer {
+        format: "HD ADF".to_owned(),
+        detail: "a 1.76 MB high-density Amiga disk image".to_owned(),
     }
 }
 

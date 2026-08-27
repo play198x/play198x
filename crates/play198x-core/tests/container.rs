@@ -410,3 +410,106 @@ fn a_zip_named_anything_is_still_a_zip() {
         vec!["real.mod"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// `Container::from_bytes` — the entry point for a caller with no filesystem,
+// such as the wasm build handed a browser `File`'s bytes directly. No fixture
+// here ever touches disk: that is the whole point of the constructor.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_resident_zip_lists_and_reads_its_entries() {
+    let zip = build_zip_with(
+        &["a/"],
+        &[
+            ("a/tune.mod", &[1u8, 2, 3][..]),
+            ("screen.scr", &[4u8; 10][..]),
+        ],
+    );
+
+    let c = Container::from_bytes(zip, "music.zip").unwrap();
+    let mut names: Vec<_> = c.entries().unwrap().into_iter().map(|e| e.path).collect();
+    names.sort();
+
+    assert_eq!(names, vec!["a/tune.mod", "screen.scr"]);
+    assert_eq!(c.read("a/tune.mod").unwrap(), vec![1, 2, 3]);
+    assert_eq!(c.read("screen.scr").unwrap(), vec![4u8; 10]);
+}
+
+#[test]
+fn a_resident_plain_file_yields_one_entry_named_as_supplied() {
+    // Neither a ZIP signature nor an ADF length, so it sniffs as a plain
+    // file — the same three-way decision `open` makes, reached from bytes
+    // that were never a path.
+    let c = Container::from_bytes(vec![7u8, 8, 9], "tune.mod").unwrap();
+
+    let entries = c.entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "tune.mod");
+    assert_eq!(entries[0].len, 3);
+    assert_eq!(c.read("tune.mod").unwrap(), vec![7, 8, 9]);
+
+    // The name is exactly what the caller supplied, not a basename derived
+    // from it — there is no path to derive one from.
+    match c.read("TUNE.MOD") {
+        Err(Error::NoSuchEntry { path }) => assert_eq!(path, "TUNE.MOD"),
+        other => panic!("expected NoSuchEntry, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_resident_disk_image_lists_and_reads_its_entries() {
+    let img = format198x_commodore_amiga_adf::master(b"payload", "demo", "Music").unwrap();
+
+    let c = Container::from_bytes(img, "collection.mod").unwrap();
+    let names: Vec<_> = c.entries().unwrap().into_iter().map(|e| e.path).collect();
+
+    assert!(names.contains(&"demo".to_owned()), "{names:?}");
+    assert_eq!(c.read("demo").unwrap(), b"payload");
+}
+
+#[test]
+fn from_bytes_refuses_an_oversized_input_by_its_length() {
+    let bytes = vec![0u8; (MAX_ARCHIVE_LEN + 4096) as usize];
+
+    match Container::from_bytes(bytes, "huge.zip") {
+        Err(Error::TooLarge { path, len, limit }) => {
+            assert_eq!(path, "huge.zip");
+            assert_eq!(len, MAX_ARCHIVE_LEN + 4096);
+            assert_eq!(limit, MAX_ARCHIVE_LEN);
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+}
+
+/// A resident plain file can be smaller than [`MAX_ARCHIVE_LEN`] — the cap
+/// `from_bytes` checks up front — yet still bigger than [`MAX_ENTRY_LEN`],
+/// which is what `read` actually enforces for a single entry. `entries` still
+/// reports the true length; only `read` refuses it, exactly as it does for
+/// [`Container::open`]'s lazy `Plain` variant.
+#[test]
+fn a_resident_plain_file_past_the_entry_cap_is_refused_only_on_read() {
+    let bytes = vec![0u8; (MAX_ENTRY_LEN + 4096) as usize];
+    let c = Container::from_bytes(bytes, "huge.bin").unwrap();
+
+    assert_eq!(c.entries().unwrap()[0].len, MAX_ENTRY_LEN + 4096);
+
+    match c.read("huge.bin") {
+        Err(Error::TooLarge { path, len, limit }) => {
+            assert_eq!(path, "huge.bin");
+            assert_eq!(len, MAX_ENTRY_LEN + 4096);
+            assert_eq!(limit, MAX_ENTRY_LEN);
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+}
+
+#[test]
+fn from_bytes_of_a_damaged_archive_is_a_typed_error_rather_than_a_panic() {
+    // A ZIP signature with nothing behind it: enough to be taken for an
+    // archive, not enough to be one.
+    match Container::from_bytes(b"PK\x03\x04ruined".to_vec(), "truncated.zip") {
+        Err(Error::Container { what }) => assert!(!what.is_empty()),
+        other => panic!("expected Container, got {other:?}"),
+    }
+}
