@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/play198x/play198x/compare/play198x-core-v0.1.0...play198x-core-v0.1.1) - 2026-08-27
+
+**Nothing changes for a caller.** This moves
+`format198x-commodore-amiga-adf` from 0.2.3 to 0.3.0
+([#7](https://github.com/play198x/play198x/pull/7)), which fixes `Disk::verify`
+reporting ordinary data disks as corrupt — any disk whose boot-checksum field
+is zero, which is what AmigaDOS `Format` leaves until `Install` writes a
+bootstrap.
+
+`play198x-core` does not call `verify`, so no behaviour here is affected today.
+It is taken deliberately rather than left: the container layer was sitting on a
+version that would have misreported an ordinary data disk the moment it started
+verifying one, and a minor bump on a `0.x` crate is semver-incompatible in
+Cargo, so it would never have arrived on its own.
+
+### Other
+
+- Dependency updated: `format198x-commodore-amiga-adf` 0.2.3 → 0.3.0. Its
+  additions — a raw sector layer, high-density floppy support, an exhaustive
+  `check` — are unused here.
+- High-density images are still refused, but the reason has expired. `open`
+  rejects a 1.76 MB image as `UnsupportedContainer`, on the grounds that it is
+  real media this crate cannot read; as of this dependency it can. Wiring it up
+  is a capability rather than a fix, so it is left for its own change.
+
 ## [0.1.0](https://github.com/play198x/play198x/releases/tag/play198x-core-v0.1.0) - 2026-08-26
 
 ### Added
