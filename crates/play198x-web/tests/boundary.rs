@@ -126,3 +126,180 @@ fn a_wrong_format_is_an_error_carrying_the_decoders_words() {
 fn an_unknown_format_name_is_an_error_not_a_guess() {
     assert!(play198x_web::decode_image(&screen(PAPER_CYAN_INK_BLACK), "jpeg").is_err());
 }
+
+/// A minimal valid ProTracker module: `M.K.` at offset 1080 (`MAGIC_OFFSET`
+/// in `format198x-commodore-amiga-mod`), a song length of one order naming
+/// pattern 0, and that one pattern stored as 1024 bytes of all-zero cells.
+/// No samples are used, so the module decodes and plays but is silent
+/// throughout — fine for tests that check `render`'s shape and counts, not
+/// its audio content. Built in code per this crate's "no media committed"
+/// rule; nothing here is a fixture file.
+///
+/// **Not fine for testing the left/right split.** Every rendered sample is
+/// zero, so `left` and `right` are indistinguishable — a de-interleave that
+/// swapped the two channels would pass every assertion built on this
+/// fixture. See [`synthetic_module_panned_left`] for the fixture that
+/// actually exercises that.
+///
+/// Layout: a 20-byte title, 31 30-byte sample headers (930 bytes), the
+/// song-length byte (offset 950), the restart byte (951), the 128-byte order
+/// table (952..1080), then the 4-byte magic — 1084 bytes total, exactly
+/// `format198x_commodore_amiga_mod`'s documented header size.
+fn synthetic_module() -> Vec<u8> {
+    let mut bytes = vec![0u8; 1084];
+    bytes[950] = 1; // song length: one order played
+    // order_table[0] is already 0, naming pattern 0 — no jump needed.
+    bytes[1080..1084].copy_from_slice(b"M.K.");
+    bytes.extend_from_slice(&[0u8; 1024]); // pattern 0: 64 rows, all-zero cells
+    bytes
+}
+
+/// A module with one non-silent note, on channel 0 only — the fixture that
+/// can actually catch a left/right swap in `render`'s de-interleave, which
+/// [`synthetic_module`]'s all-zero content cannot: with no PCM, `left` and
+/// `right` come back identical (both zero) whichever way the two channels
+/// are assigned, so a swap there passes silently.
+///
+/// `play198x_core::engine`'s `PANNING` table hard-pans channel 0 (and 3)
+/// left and channel 1 (and 2) right — ProTracker's fixed Amiga wiring, not
+/// a choice this crate makes. Row 0 here plays C-2 (period 428) on channel 0
+/// against a 64-byte constant-level sample at full volume; channels 1–3
+/// carry no note at all, so they never retrigger and stay silent for the
+/// engine's own reasons, independent of panning. The result the engine
+/// itself guarantees: non-zero output on the left, exact silence on the
+/// right. If `render`'s de-interleave ever swapped `left[i]`/`right[i]`,
+/// this fixture's two assertions would both fail.
+///
+/// Sample 1's header: length 32 words (64 bytes, offset 22..24), volume 64
+/// (offset 25, full scale), no loop (`repeat_start_words`/
+/// `repeat_length_words` left at 0, which `Sample::is_looped` reads as
+/// unlooped). At 48 kHz, C-2 advances the sample position by about 0.173
+/// bytes per output frame (`PAULA_CLOCK_PAL / (2 * 428) / 48_000`), so 128
+/// frames — one render quantum — consume about 22 of the sample's 64 bytes:
+/// comfortably inside it, no loop needed to sustain output for the whole
+/// buffer under test.
+fn synthetic_module_panned_left() -> Vec<u8> {
+    let mut bytes = vec![0u8; 20]; // title: left blank, not under test here
+    for slot in 0..31u8 {
+        let mut header = vec![0u8; 30];
+        if slot == 0 {
+            let sample_len_words: u16 = 32; // 64 bytes of PCM
+            header[22..24].copy_from_slice(&sample_len_words.to_be_bytes());
+            header[25] = 64; // volume: full scale
+        }
+        bytes.extend_from_slice(&header);
+    }
+    bytes.push(1); // song length: one order played
+    bytes.push(0); // restart byte, unread by playback
+    bytes.extend_from_slice(&[0u8; 128]); // order table; order 0 -> pattern 0
+    bytes.extend_from_slice(b"M.K.");
+
+    // Pattern 0: 64 rows * 4 channels * 4 bytes/cell, all zero except row 0's
+    // channel 0 cell, which names sample 1 at period 428 (C-2).
+    let mut pattern = vec![0u8; 64 * 4 * 4];
+    let (period, sample_number) = (428u16, 1u8);
+    pattern[0] = (sample_number & 0xF0) | ((period >> 8) as u8);
+    pattern[1] = (period & 0xFF) as u8;
+    pattern[2] = (sample_number & 0x0F) << 4;
+    bytes.extend_from_slice(&pattern);
+
+    // Sample 1's PCM: a constant, clearly non-zero level (+100 as signed
+    // 8-bit) rather than anything near the noise floor, so there is no
+    // ambiguity about whether the left buffer's non-zero reading is real.
+    bytes.extend_from_slice(&[100u8; 64]);
+    bytes
+}
+
+#[wasm_bindgen_test]
+fn render_puts_a_hard_left_note_in_the_left_buffer_only() {
+    let mut player =
+        play198x_web::ModulePlayer::new(&synthetic_module_panned_left(), 48_000).unwrap();
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    player.render(quantum);
+
+    let left = player.debug_left();
+    let right = player.debug_right();
+    assert!(
+        left.iter().any(|&s| s != 0.0),
+        "channel 0's note must reach the left buffer: {left:?}"
+    );
+    assert!(
+        right.iter().all(|&s| s == 0.0),
+        "channel 0 is panned hard left; the right buffer must stay silent: {right:?}"
+    );
+}
+
+#[wasm_bindgen_test]
+fn a_player_renders_the_frames_it_is_asked_for() {
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    assert_eq!(player.render(quantum), quantum);
+}
+
+#[wasm_bindgen_test]
+fn render_clamps_a_request_past_the_render_quantum() {
+    // The per-channel buffers are sized once, at construction, to exactly
+    // `render_quantum()` frames and never grown — a request for more must
+    // clip rather than reallocate, which is the property a cached
+    // `Float32Array` view over them depends on.
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    assert_eq!(player.render(quantum + 1_000), quantum);
+}
+
+#[wasm_bindgen_test]
+fn a_paused_player_renders_silence_rather_than_stopping() {
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    player.set_playing(false);
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    let rendered = player.render(quantum);
+    assert_eq!(rendered, quantum, "a paused player still fills its buffers");
+    assert!(
+        player.debug_left().iter().all(|&s| s == 0.0),
+        "left channel is silent"
+    );
+    assert!(
+        player.debug_right().iter().all(|&s| s == 0.0),
+        "right channel is silent"
+    );
+}
+
+#[wasm_bindgen_test]
+fn render_buffers_keep_the_same_address_across_calls() {
+    // `left_ptr`/`right_ptr` are only useful to a caller that built a view
+    // over them once and expects it to still be good on the next call —
+    // this is the Rust-side half of that guarantee (the other half, that
+    // wasm memory itself can still grow and detach the view regardless, is
+    // documented on `wasm_memory` and is a JS-side concern this crate
+    // cannot test from here).
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    player.render(quantum);
+    let (left_before, right_before) = (player.left_ptr(), player.right_ptr());
+    player.render(quantum);
+    assert_eq!(player.left_ptr(), left_before);
+    assert_eq!(player.right_ptr(), right_before);
+}
+
+#[wasm_bindgen_test]
+fn bytes_that_are_not_a_module_are_an_error_not_a_guess() {
+    assert!(play198x_web::ModulePlayer::new(&screen(PAPER_CYAN_INK_BLACK), 48_000).is_err());
+}
+
+#[wasm_bindgen_test]
+fn a_fresh_player_starts_at_the_top_of_the_order_table() {
+    let player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    assert_eq!(player.order(), 0);
+    assert_eq!(player.pattern(), 0);
+    assert_eq!(player.row(), 0);
+    assert_eq!(player.tick(), 0);
+}
+
+#[wasm_bindgen_test]
+fn seek_order_clamps_to_the_songs_played_prefix() {
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    // The synthetic module plays exactly one order (song length 1), so any
+    // order past that clamps back to the last playable one, order 0.
+    player.seek_order(99);
+    assert_eq!(player.order(), 0);
+}
