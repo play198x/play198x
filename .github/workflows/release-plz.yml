@@ -9,10 +9,19 @@ concurrency:
   group: release-plz-${{ github.ref }}
   cancel-in-progress: false
 
-# No PAT: the default GITHUB_TOKEN drives everything. Opening the release PR
-# needs the org/repo setting "Allow GitHub Actions to create and approve pull
-# requests" enabled (Settings -> Actions -> General). id-token is what lets
-# release-plz publish to crates.io over Trusted Publishing — no stored token.
+# Opening the release PR needs the org/repo setting "Allow GitHub Actions to
+# create and approve pull requests" enabled (Settings -> Actions -> General).
+# id-token is what lets release-plz publish to crates.io over Trusted
+# Publishing — no stored registry token.
+#
+# The release PR itself is pushed with RELEASE_PLZ_TOKEN when that secret
+# exists, and GITHUB_TOKEN otherwise. This is not cosmetic: a branch pushed by
+# GITHUB_TOKEN does not trigger workflows, so under GITHUB_TOKEN alone the
+# release PR gets **no CI at all** — the one change in this repository that
+# publishes to crates.io would be the only one merged unverified. Measured
+# 2026-08-27: on the v0.1.1 release branch the only workflow runs were on
+# commits pushed by a human; release-plz's own commit had none. build198x, whose
+# org does hold the secret, gets a run on every release-plz commit.
 permissions:
   pull-requests: write
   contents: write
@@ -26,7 +35,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
+          # release-plz needs full history to diff the changelog from the last
+          # tag.
           fetch-depth: 0
+          # Pushing the release branch with this token is what lets CI run on
+          # the release PR; see the note above. Falls back to GITHUB_TOKEN, so
+          # this is inert rather than broken until the play198x org has its own
+          # fine-grained PAT (one per org — never shared between them).
+          token: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Read pinned toolchain
         id: toolchain
@@ -45,7 +61,7 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
       # Once a release PR is merged, tag the crate and publish it. publish = true
       # in release-plz.toml, so release-plz runs cargo publish itself, exchanging
@@ -57,4 +73,4 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
