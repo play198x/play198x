@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "play198x-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "format198x-commodore-amiga-adf",
  "format198x-commodore-amiga-ilbm",
