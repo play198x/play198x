@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/play198x/play198x/compare/play198x-core-v0.1.1...play198x-core-v0.1.2) - 2026-08-27
+
+### Added
+
+- open a container from resident bytes, for callers with no filesystem
+
 ## [0.1.1](https://github.com/play198x/play198x/compare/play198x-core-v0.1.0...play198x-core-v0.1.1) - 2026-08-27
 
 **Nothing changes for a caller.** This moves
