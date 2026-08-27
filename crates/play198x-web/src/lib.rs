@@ -8,6 +8,17 @@
 use play198x_core::probe::{Confidence, Format};
 use wasm_bindgen::prelude::*;
 
+/// Frames [`ModulePlayer::render`] fills per call.
+///
+/// The Web Audio render quantum: fixed by the Web Audio spec at 128 samples,
+/// and confirmed by the spike this crate's plan cites (128 samples at 48 kHz,
+/// called roughly every 2.7 ms, 0 glitches across 45,750 callbacks).
+/// [`ModulePlayer`]'s per-channel buffers are sized to exactly this many
+/// frames, once, at construction, and nothing afterwards grows them — which
+/// is what lets a caller build a `Float32Array` view over them and reuse
+/// that view across calls instead of re-acquiring it every render.
+const RENDER_QUANTUM: usize = 128;
+
 /// What `probe` found.
 #[wasm_bindgen]
 pub struct Probed {
@@ -348,21 +359,55 @@ impl Container {
 
 /// A playing ProTracker module, wrapped for an `AudioWorkletProcessor`.
 ///
-/// The worklet calls [`Self::render`] roughly every 2.7 ms with a 128-sample
-/// buffer it owns — see the spike report this crate's plan cites. That shape
-/// is why `render` takes a caller-owned `&mut [f32]` rather than returning a
-/// `Vec`: the core's [`play198x_core::engine::Engine::render`] is
-/// allocation-free by design (`play198x-core`'s counting-allocator test holds
-/// it to that), and an audio callback that allocates is one that eventually
-/// glitches on somebody else's machine. This shell adds nothing per call
-/// either — it forwards straight into the engine's own buffer.
+/// The worklet calls [`Self::render`] roughly every 2.7 ms — see the spike
+/// report this crate's plan cites. A first version of this type had `render`
+/// take a caller-owned `&mut [f32]`, which reads as allocation-free in Rust
+/// and is not: wasm-bindgen's generated glue for a mutable slice parameter
+/// mallocs a buffer, copies the caller's array into it, calls the wasm
+/// function, copies the result back out, and frees the buffer — every call,
+/// on the audio-rendering thread. `play198x-core`'s counting-allocator test
+/// only ever watched [`play198x_core::engine::Engine::render`] itself, one
+/// layer below where that malloc happens, so it could not have caught this.
+///
+/// This shape avoids it structurally instead of by care: [`Self::render`]
+/// takes no slice at all. It fills two buffers *this struct already owns*
+/// and hands the caller a pointer into wasm linear memory
+/// ([`Self::left_ptr`], [`Self::right_ptr`]) plus [`wasm_memory`] to build a
+/// `Float32Array` view over it. A view is a window onto the same bytes, not
+/// a copy — writing through it happens on the wasm side, reading it happens
+/// on the JS side, and nothing crosses the boundary but two pointers (read
+/// once) and a frame count (every call). See the package README for the
+/// exact JS-side pattern, including the one caveat a view brings with it:
+/// it detaches if the wasm module's memory grows.
 #[wasm_bindgen]
 pub struct ModulePlayer {
     engine: play198x_core::engine::Engine,
+    /// Interleaved scratch the engine writes into — [`RENDER_QUANTUM`]
+    /// stereo frames, sized once at construction and only ever borrowed as a
+    /// slice afterwards, never resized. `Engine::render` wants one
+    /// contiguous interleaved buffer; [`Self::render`] de-interleaves it
+    /// into `left`/`right` below, which is what a Web Audio channel wants.
+    interleaved: Vec<f32>,
+    /// De-interleaved per-channel output, [`RENDER_QUANTUM`] frames each.
+    /// Never reallocated after construction, which is what makes their
+    /// addresses ([`Self::left_ptr`]/[`Self::right_ptr`]) stable for a
+    /// caller to build a view over once and reuse.
+    left: Vec<f32>,
+    right: Vec<f32>,
 }
 
 #[wasm_bindgen]
 impl ModulePlayer {
+    /// Frames [`Self::render`] fills per call, and the length of the buffers
+    /// [`Self::left_ptr`]/[`Self::right_ptr`] point at. A plain function
+    /// rather than a duplicated literal on the JavaScript side, so the two
+    /// can never quietly disagree.
+    #[wasm_bindgen(js_name = renderQuantum)]
+    #[must_use]
+    pub fn render_quantum() -> usize {
+        RENDER_QUANTUM
+    }
+
     /// Decode `bytes` as a ProTracker module and start it playing at
     /// `sample_rate`.
     ///
@@ -381,22 +426,56 @@ impl ModulePlayer {
             play198x_core::decode::module(bytes).map_err(|err| JsError::new(&err.to_string()))?;
         Ok(Self {
             engine: play198x_core::engine::Engine::new(module, sample_rate),
+            interleaved: vec![0.0; RENDER_QUANTUM * 2],
+            left: vec![0.0; RENDER_QUANTUM],
+            right: vec![0.0; RENDER_QUANTUM],
         })
     }
 
-    /// Fill `out` with interleaved stereo samples, returning how many it
-    /// wrote — always `out.len()` rounded down to an even count, whether
-    /// playing or paused.
+    /// Render into this player's own buffers, returning how many frames it
+    /// actually wrote — read the result through [`Self::left_ptr`] and
+    /// [`Self::right_ptr`], not a return value.
     ///
-    /// A paused player still fills `out`, with silence rather than a short
-    /// count: the engine renders exact zeroes for a paused transport (see
-    /// [`play198x_core::engine::Engine::render`]'s own doc), and a worklet
-    /// callback that gets fewer samples than it asked for is a worklet
-    /// callback that clicks. `out.len()` in, an even number back — the core
-    /// works in whole stereo frames, so an odd trailing sample is left
-    /// untouched and not counted.
-    pub fn render(&mut self, out: &mut [f32]) -> usize {
-        self.engine.render(out) * 2
+    /// `frames` past [`Self::render_quantum`] is clamped rather than grown
+    /// into: the buffers are sized once, at construction, and this call
+    /// never reallocates them, which is the property a cached `Float32Array`
+    /// view depends on. A worklet always asks for exactly the render
+    /// quantum, so this only clips a caller error — it does not fail loudly
+    /// because nothing on this side of the FFI boundary is allowed to.
+    ///
+    /// A paused player still renders a full quantum of silence rather than
+    /// fewer frames: the engine renders exact zeroes for a paused transport
+    /// (see [`play198x_core::engine::Engine::render`]'s own doc), and a
+    /// worklet callback that gets fewer samples than it asked for is a
+    /// worklet callback that clicks.
+    ///
+    /// Allocates nothing: `interleaved` is only ever sliced, never resized,
+    /// and the de-interleave loop below writes into `left`/`right` in place.
+    pub fn render(&mut self, frames: usize) -> usize {
+        let frames = frames.min(RENDER_QUANTUM);
+        let rendered = self.engine.render(&mut self.interleaved[..frames * 2]);
+        for i in 0..rendered {
+            self.left[i] = self.interleaved[i * 2];
+            self.right[i] = self.interleaved[i * 2 + 1];
+        }
+        rendered
+    }
+
+    /// Pointer to the left channel's buffer in wasm linear memory,
+    /// [`Self::render_quantum`] frames long. Build a `Float32Array` over it
+    /// with [`wasm_memory`] — see that function's doc for the one thing to
+    /// get right before holding onto the view it lets you build.
+    #[wasm_bindgen(getter, js_name = leftPtr)]
+    #[must_use]
+    pub fn left_ptr(&self) -> *const f32 {
+        self.left.as_ptr()
+    }
+
+    /// The right channel's counterpart to [`Self::left_ptr`].
+    #[wasm_bindgen(getter, js_name = rightPtr)]
+    #[must_use]
+    pub fn right_ptr(&self) -> *const f32 {
+        self.right.as_ptr()
     }
 
     /// Start or pause playback. A paused player keeps its position and its
@@ -440,4 +519,67 @@ impl ModulePlayer {
     pub fn tick(&self) -> u8 {
         self.engine.position().tick
     }
+}
+
+/// Test-facing accessors, deliberately **not** in the `#[wasm_bindgen] impl`
+/// block above: anything in that block becomes a JS binding, and a
+/// convenient "just copy the samples out for me" method is exactly the
+/// shortcut [`ModulePlayer::render`]'s design exists to make impossible —
+/// production code reads `left`/`right` through [`ModulePlayer::left_ptr`],
+/// [`ModulePlayer::right_ptr`] and [`wasm_memory`] without copying. These
+/// two exist only so the Rust-side tests in `tests/boundary.rs` can check
+/// what `render` wrote without reaching for `unsafe` themselves — this
+/// crate denies `unsafe_code` even in tests, and a raw-pointer read is the
+/// one thing standing between a test and the same buffers a browser reads
+/// through a view. Named and hidden the same way
+/// [`play198x_core::engine::Engine::debug_channel_volume`] is, for the same
+/// reason.
+impl ModulePlayer {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_left(&self) -> Vec<f32> {
+        self.left.clone()
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_right(&self) -> Vec<f32> {
+        self.right.clone()
+    }
+}
+
+/// A handle to this wasm instance's linear memory, for building a
+/// `Float32Array` view over [`ModulePlayer::left_ptr`]/
+/// [`ModulePlayer::right_ptr`] without copying — `new
+/// Float32Array(wasmMemory().buffer, ptr, len)`, where `ptr` is a byte
+/// offset (as `left_ptr`/`right_ptr` return it) and `len` is in elements,
+/// per the `Float32Array` constructor's own contract. No new dependency
+/// needed for it: `wasm_bindgen::memory()` is part of the `wasm-bindgen`
+/// crate already in this crate's `Cargo.toml`, not `js-sys`.
+///
+/// # Memory growth detaches existing views
+///
+/// A `Float32Array` built over `.buffer` **detaches** the moment this wasm
+/// module's linear memory grows: the runtime gives the module a new, larger
+/// `ArrayBuffer` rather than resizing the old one in place, and a view over
+/// the old one goes dead — reads come back zero, forever, with no
+/// exception. [`ModulePlayer::render`] never causes this itself (its buffers
+/// are sized once, at construction, and never grow) — but *another*
+/// allocation in the same wasm instance can: decoding a second module for a
+/// different [`ModulePlayer`] in the same worklet, for one.
+///
+/// Nothing on this side of the boundary can stop memory from growing, so the
+/// fix belongs to the caller: compare a cached view's `.buffer` against a
+/// fresh `wasmMemory().buffer` by reference before trusting it, and rebuild
+/// the view when they differ. That comparison is a reference check, not an
+/// allocation — cheap enough to run every [`ModulePlayer::render`] call, and
+/// the package README shows the exact pattern.
+///
+/// Available for the `web` and `nodejs` targets this package builds for —
+/// `wasm_bindgen::memory`'s own restriction, and both targets `wasm-pack
+/// build` verifies for this crate.
+#[wasm_bindgen(js_name = wasmMemory)]
+#[must_use]
+pub fn wasm_memory() -> JsValue {
+    wasm_bindgen::memory()
 }

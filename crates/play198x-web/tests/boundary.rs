@@ -151,21 +151,53 @@ fn synthetic_module() -> Vec<u8> {
 #[wasm_bindgen_test]
 fn a_player_renders_the_frames_it_is_asked_for() {
     let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
-    let mut buffer = vec![0.0f32; 1024];
-    assert_eq!(player.render(&mut buffer), 1024);
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    assert_eq!(player.render(quantum), quantum);
+}
+
+#[wasm_bindgen_test]
+fn render_clamps_a_request_past_the_render_quantum() {
+    // The per-channel buffers are sized once, at construction, to exactly
+    // `render_quantum()` frames and never grown — a request for more must
+    // clip rather than reallocate, which is the property a cached
+    // `Float32Array` view over them depends on.
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    assert_eq!(player.render(quantum + 1_000), quantum);
 }
 
 #[wasm_bindgen_test]
 fn a_paused_player_renders_silence_rather_than_stopping() {
     let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
     player.set_playing(false);
-    let mut buffer = vec![1.0f32; 256];
-    let rendered = player.render(&mut buffer);
-    assert_eq!(rendered, 256, "a paused player still fills its buffer");
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    let rendered = player.render(quantum);
+    assert_eq!(rendered, quantum, "a paused player still fills its buffers");
     assert!(
-        buffer.iter().all(|&s| s == 0.0),
-        "and fills it with silence"
+        player.debug_left().iter().all(|&s| s == 0.0),
+        "left channel is silent"
     );
+    assert!(
+        player.debug_right().iter().all(|&s| s == 0.0),
+        "right channel is silent"
+    );
+}
+
+#[wasm_bindgen_test]
+fn render_buffers_keep_the_same_address_across_calls() {
+    // `left_ptr`/`right_ptr` are only useful to a caller that built a view
+    // over them once and expects it to still be good on the next call —
+    // this is the Rust-side half of that guarantee (the other half, that
+    // wasm memory itself can still grow and detach the view regardless, is
+    // documented on `wasm_memory` and is a JS-side concern this crate
+    // cannot test from here).
+    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let quantum = play198x_web::ModulePlayer::render_quantum();
+    player.render(quantum);
+    let (left_before, right_before) = (player.left_ptr(), player.right_ptr());
+    player.render(quantum);
+    assert_eq!(player.left_ptr(), left_before);
+    assert_eq!(player.right_ptr(), right_before);
 }
 
 #[wasm_bindgen_test]
