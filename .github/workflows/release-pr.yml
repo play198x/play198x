@@ -1,0 +1,29 @@
+name: Release PR
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  changelog-version:
+    name: Released versions have changelog entries
+    if: startsWith(github.event.pull_request.title, 'chore') && contains(github.event.pull_request.title, 'release')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Match manifest versions to added changelog headings
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          versions="$({ git diff --unified=0 "$BASE_SHA" -- '**/Cargo.toml' Cargo.toml | sed -nE 's/^\+version = "([0-9]+\.[0-9]+\.[0-9]+).*"$/\1/p'; } | sort -u)"
+          changelog_diff="$(git diff --unified=0 "$BASE_SHA" -- '**/CHANGELOG.md' CHANGELOG.md)"
+          if [[ -z "$versions" ]]; then grep -Eq '^\+## \[[0-9]+\.[0-9]+\.[0-9]+\]' <<<"$changelog_diff" || { echo 'Release PR adds neither a manifest version nor a versioned changelog heading.' >&2; exit 1; }; exit 0; fi
+          while IFS= read -r version; do
+            grep -Fq "+## [$version]" <<<"$changelog_diff" || { echo "Release PR changes a manifest to $version but adds no '## [$version]' changelog heading." >&2; exit 1; }
+          done <<<"$versions"
