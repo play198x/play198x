@@ -282,7 +282,8 @@ const META_SAMPLE_RATE: u32 = 48_000;
 /// own message unchanged, as [`ModulePlayer::new`] does.
 #[wasm_bindgen(js_name = moduleMeta)]
 pub fn module_meta(bytes: &[u8]) -> Result<ModuleMeta, JsError> {
-    let module = play198x_core::decode::module(bytes).map_err(|error| JsError::new(&error.to_string()))?;
+    let module =
+        play198x_core::decode::module(bytes).map_err(|error| JsError::new(&error.to_string()))?;
     Ok(ModuleMeta {
         inner: play198x_core::metadata::module_meta(&module, META_SAMPLE_RATE),
     })
