@@ -5,10 +5,6 @@ on:
     branches:
       - main
 
-concurrency:
-  group: release-plz-${{ github.ref }}
-  cancel-in-progress: false
-
 # Opening the release PR needs the org/repo setting "Allow GitHub Actions to
 # create and approve pull requests" enabled (Settings -> Actions -> General).
 # id-token is what lets release-plz publish to crates.io over Trusted
@@ -28,8 +24,8 @@ permissions:
   id-token: write
 
 jobs:
-  release-plz:
-    name: Release-plz
+  release:
+    name: Publish merged releases
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -54,14 +50,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-
-      # Open/update the "chore: release" PR for new commits.
-      - name: Run release-plz (open/update release PR)
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
       # Once a release PR is merged, tag the crate and publish it. publish = true
       # in release-plz.toml, so release-plz runs cargo publish itself, exchanging
@@ -145,3 +133,26 @@ jobs:
           fi
 
           echo "Announced to ${#targets[@]} Discord channel(s)."
+
+  release-pr:
+    name: Prepare the next release
+    needs: release
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+      - id: toolchain
+        run: echo "channel=$(awk -F'\"' '/^channel/{print $2}' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
