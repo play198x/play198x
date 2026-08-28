@@ -27,6 +27,9 @@ publish = true
 git_release_enable = true
 git_tag_enable = true
 changelog_update = true
+# Only reader-facing changes earn a release. Release-process work uses `ci:` or
+# `chore(release):`; changelog filtering alone does not prevent a version bump.
+release_commits = "^(feat|fix|perf|revert)[(:]"
 # Package-prefixed tags (<crate>-v<version>) even while there's a single crate:
 # it matches the baseline tag and keeps future multi-crate tags unambiguous.
 # Without this, a single-crate workspace defaults to the bare `v<version>`,
