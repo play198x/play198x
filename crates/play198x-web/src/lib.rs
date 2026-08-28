@@ -248,6 +248,129 @@ impl DecodedImage {
     }
 }
 
+/// What a module says about itself: its title, its shape, every sample name,
+/// and how long it plays.
+///
+/// Built from bytes rather than from a [`ModulePlayer`], and that is the
+/// point. A player is constructed on the audio thread, inside the worklet,
+/// after a visitor has asked for sound; a player's info panel needs to say
+/// what the file is *before* that. So this reads the module the same way
+/// [`probe`] does — on whatever thread is asking — and never touches the
+/// playing engine.
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct ModuleMeta {
+    inner: play198x_core::metadata::ModuleMeta,
+}
+
+/// The rate the timing walk runs at.
+///
+/// It changes none of the numbers this type reports — `play198x_core`'s
+/// `module_meta` states that a tick is `2500 / tempo` milliseconds whatever
+/// the output rate is, and takes the rate only so the walk happens under the
+/// same engine a caller would play with. Fixed here rather than asked for,
+/// because a caller cannot supply a meaningful value for something that
+/// cannot affect the answer, and one that had to invent a number would
+/// reasonably assume it mattered.
+const META_SAMPLE_RATE: u32 = 48_000;
+
+/// Read a ProTracker module's metadata.
+///
+/// # Errors
+///
+/// When the bytes are not a 4-channel ProTracker module — carrying the core's
+/// own message unchanged, as [`ModulePlayer::new`] does.
+#[wasm_bindgen(js_name = moduleMeta)]
+pub fn module_meta(bytes: &[u8]) -> Result<ModuleMeta, JsError> {
+    let module =
+        play198x_core::decode::module(bytes).map_err(|error| JsError::new(&error.to_string()))?;
+    Ok(ModuleMeta {
+        inner: play198x_core::metadata::module_meta(&module, META_SAMPLE_RATE),
+    })
+}
+
+#[wasm_bindgen]
+impl ModuleMeta {
+    /// The 20-byte title field, Latin-1, trimmed at its first NUL. Empty when
+    /// the author left it empty, which is common.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn title(&self) -> String {
+        self.inner.title.clone()
+    }
+
+    /// The four-byte magic as text — `M.K.`, `FLT4`, and the rest.
+    #[wasm_bindgen(getter, js_name = formatTag)]
+    #[must_use]
+    pub fn format_tag(&self) -> String {
+        self.inner.format_tag.clone()
+    }
+
+    /// Voices the magic names: 4 for the modules this crate decodes.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn channels(&self) -> u8 {
+        self.inner.channels
+    }
+
+    /// Patterns the file physically holds, which is not the number the order
+    /// table names — a module can carry patterns no position ever plays.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn patterns(&self) -> u32 {
+        u32::try_from(self.inner.patterns).unwrap_or(u32::MAX)
+    }
+
+    /// Order-table entries the song plays: its `song_length` prefix, not the
+    /// format's fixed 128.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn orders(&self) -> u32 {
+        u32::try_from(self.inner.orders).unwrap_or(u32::MAX)
+    }
+
+    /// One name per sample slot, in slot order: **always 31 entries**,
+    /// including slots holding no sample. Authors used the empty ones for
+    /// greetings, credits and whole paragraphs, so the empty ones are often
+    /// the interesting ones — see `play198x_core::metadata`'s own note.
+    #[wasm_bindgen(getter, js_name = sampleNames)]
+    #[must_use]
+    pub fn sample_names(&self) -> Vec<String> {
+        self.inner.sample_names.clone()
+    }
+
+    /// How long one pass lasts, in milliseconds: from the top of the order
+    /// table to whichever comes first — the end of the song, an `F00` that
+    /// stops it, or a position the song has already played.
+    #[wasm_bindgen(getter, js_name = durationMs)]
+    #[must_use]
+    pub fn duration_ms(&self) -> f64 {
+        self.inner.timing.duration.as_secs_f64() * 1_000.0
+    }
+
+    /// Whether the song returns to a position it has already played instead
+    /// of running off the end of its order table. A looping module has no
+    /// single length, so an interface that shows [`Self::duration_ms`] as an
+    /// ending needs this to say otherwise.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn loops(&self) -> bool {
+        self.inner.timing.loops
+    }
+
+    /// How far into [`Self::duration_ms`] the repeated position was first
+    /// reached — the point playback comes back to. `undefined` when the song
+    /// does not loop.
+    #[wasm_bindgen(getter, js_name = loopStartMs)]
+    #[must_use]
+    pub fn loop_start_ms(&self) -> Option<f64> {
+        self.inner
+            .timing
+            .loop_start
+            .map(|start| start.as_secs_f64() * 1_000.0)
+    }
+}
+
 /// One entry inside an opened [`Container`], flattened for JavaScript.
 ///
 /// [`Container::entry_path`] and [`Container::entry_len`] hand these fields
