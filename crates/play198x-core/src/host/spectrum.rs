@@ -1,13 +1,18 @@
 use crate::host::memory::Memory;
 use emu198x_zilog_z80::{BusOp, Z80};
 
+/// Re-exported because [`SpectrumHost::ay`] is a public field of its type:
+/// without this, a caller outside this crate can see the field and cannot
+/// name what is in it.
+pub use emu198x_gi_ay_3_8910::Ay3_8910;
+
 /// What an `IN` from a port nothing answers reads back.
 ///
 /// The Z80's data bus has no keeper: with no device driving it, the pull-ups
 /// win and every line reads high. This host wires up a sound chip and a
 /// paging latch and nothing else, so every other port a tune probes — a
 /// joystick, a disk interface, the keyboard — reads as absent, which is what
-/// it is.
+/// it is. So does the AY's own port on a host with no chip fitted.
 pub(crate) const UNATTACHED_BUS: u8 = 0xFF;
 
 /// The address lines the 128K's memory-paging latch decodes: A15 and A1,
@@ -35,9 +40,18 @@ const PAGING_DECODE_MATCH: u16 = 0x0000;
 /// (`syntheses/zx-spectrum/128k-extras.md`, § I/O ports).
 ///
 /// Named rather than written twice: a write here selects a register and a
-/// read here reads that register back, and the read is answered by
-/// `AyPlayer`, which owns the chip. Two copies of one decode in two files
-/// is a pair that can drift apart without anything failing to compile.
+/// read here reads that register back, so both paths must agree, and two
+/// copies of one decode are a pair that can drift apart without anything
+/// failing to compile.
+///
+/// The cited synthesis and this code disagree about the read, and the code
+/// is right: § I/O ports there says "`$BFFD` (data): read/write the selected
+/// register's value", but the AY's data lines are only driven onto the bus
+/// for an `IN` from the *select* port. `emu198x-gi-ay-3-8910`'s
+/// `read_data()` documents it as "IN from port $FFFD" and matches Fuse's
+/// `ay_registerport_read`, and it is what the archive's read-back tunes
+/// actually do. Recorded here rather than silently: a reader who checks the
+/// synthesis will otherwise think this decode is wrong.
 pub(crate) const AY_SELECT_DECODE_MASK: u16 = 0xC002;
 pub(crate) const AY_SELECT_DECODE_MATCH: u16 = 0xC000;
 
@@ -52,15 +66,22 @@ pub(crate) const AY_SELECT_DECODE_MATCH: u16 = 0xC000;
 pub struct SpectrumHost {
     pub cpu: Z80,
     pub mem: Memory,
+    /// The sound chip, if one is fitted. `None` is a host with no AY on the
+    /// board: its port reads as [`UNATTACHED_BUS`] and its writes go
+    /// nowhere, which is what a machine without the chip does.
+    ///
+    /// The chip belongs to the host and not to whatever is driving it,
+    /// because [`SpectrumHost::step`] has to answer the bus. A chip owned by
+    /// a caller means the caller has to patch the answer afterwards, and
+    /// then two callers of the same public `step` get two different answers
+    /// from the same port.
+    pub ay: Option<Ay3_8910>,
     /// Register the AY has selected, via port 0xFFFD.
     pub ay_register: u8,
-    /// Latest value written to an AY register, and which one — drained by the
-    /// player, which owns the chip.
-    pub ay_write: Option<(u8, u8)>,
     /// Set on any write to an AY data register (port 0xBFFD). Mirrors
-    /// `speaker_written` for the same reason: `ay_write` above is drained
-    /// every host cycle by the player that owns the chip, so nothing
-    /// survives in it to inspect once playback has run.
+    /// `speaker_written` for the same reason: the value itself goes into the
+    /// chip, so nothing survives on this struct to inspect once playback has
+    /// run.
     ///
     /// No production code reads this field — it exists as instrumentation
     /// for `tests/ay_corpus.rs`'s sweep, which needs to tell a tune that
@@ -76,11 +97,13 @@ pub struct SpectrumHost {
     /// Set on any write to port 0xFE, so a tune that only uses the beeper can
     /// be told from one that makes no sound at all.
     pub speaker_written: bool,
-    /// Set on any write that reaches the 128K memory-paging latch — see
-    /// [`PAGING_DECODE_MASK`] for which addresses those are.
+    /// Set on any write that reaches the 128K memory-paging latch *and is
+    /// acted on* — see [`PAGING_DECODE_MASK`] for which addresses reach it,
+    /// and [`Memory::page`] for when the latch stops accepting writes.
     ///
-    /// The write itself is acted on: [`Memory::page`] moves the bank at
-    /// 0xC000. This field only records that it happened.
+    /// A write the latch has been locked out of does not count. What this
+    /// measures is how much of an archive this host's memory model has to
+    /// answer for, and a discarded write is one it does not.
     ///
     /// No production code reads it — it exists as instrumentation for
     /// `tests/ay_corpus.rs`'s sweep, which reports how much of a real
@@ -89,8 +112,8 @@ pub struct SpectrumHost {
     /// written for. Mirrors `ay_written` and `speaker_written` above for
     /// the same reason.
     pub paging_written: bool,
-    /// Bitwise-OR of every value written to the paging latch since
-    /// construction.
+    /// Bitwise-OR of every value the paging latch accepted since
+    /// construction — the same acceptance test as `paging_written` above.
     ///
     /// Zero after any number of writes means every one of them wrote 0x00 —
     /// RAM bank 0 at 0xC000, screen 0, ROM 0, paging unlocked, the same
@@ -99,9 +122,9 @@ pub struct SpectrumHost {
     /// question from how many of them touch the port.
     pub paging_values_seen: u8,
     /// The port most recently read via an `IoRead` bus request, if any
-    /// since the last drain. Drained by `AyPlayer::step_with_chip`, which
-    /// owns the AY chip and answers the chip's read port from it — this
-    /// host holds no chip of its own to ask, see `step`'s doc.
+    /// since the last drain. The read is already answered by the time this
+    /// is set — see [`SpectrumHost::step`]; this only records that it
+    /// happened, and which port.
     ///
     /// No production code reads this field — it exists as instrumentation
     /// for the read-side counters on [`crate::player::ay::AyPlayer`], which
@@ -121,8 +144,8 @@ impl SpectrumHost {
         Self {
             cpu: Z80::new(),
             mem: Memory::new(),
+            ay: None,
             ay_register: 0,
-            ay_write: None,
             ay_written: false,
             speaker: false,
             speaker_written: false,
@@ -145,16 +168,37 @@ impl SpectrumHost {
             Some(BusOp::MemWrite) => self.mem.write(self.cpu.addr, self.cpu.data),
             Some(BusOp::IoWrite) => self.io_write(self.cpu.addr, self.cpu.data),
             Some(BusOp::IoRead) => {
-                // The answer for every port but the AY's data port, which
-                // `AyPlayer::step_with_chip` overwrites from the chip
-                // before the CPU latches it: the chip belongs to the
-                // player, so this host cannot answer for it here. See
-                // [`UNATTACHED_BUS`] for what this value is.
-                self.cpu.data_in = UNATTACHED_BUS;
-                self.io_read = Some(self.cpu.addr);
+                let port = self.cpu.addr;
+                self.cpu.data_in = self.io_read(port);
+                self.io_read = Some(port);
             }
             Some(BusOp::IntAck) => self.cpu.data_in = 0xFF,
             None => {}
+        }
+    }
+
+    /// What answers an `IN` from `port`.
+    ///
+    /// The AY drives the bus for a read of its select port, and only when a
+    /// chip is fitted; nothing else on this host drives it at all, so every
+    /// other port reads as [`UNATTACHED_BUS`].
+    ///
+    /// The chip's selected register is set from this host's last select
+    /// write rather than assumed to be in step. It matters for a tune that
+    /// selects a register and reads it straight back without writing data to
+    /// it first — real hardware answers that, and a chip whose selection
+    /// only moved on data writes would not.
+    fn io_read(&mut self, port: u16) -> u8 {
+        if port & AY_SELECT_DECODE_MASK != AY_SELECT_DECODE_MATCH {
+            return UNATTACHED_BUS;
+        }
+        let register = self.ay_register;
+        match &mut self.ay {
+            Some(ay) => {
+                ay.select_register(register);
+                ay.read_data()
+            }
+            None => UNATTACHED_BUS,
         }
     }
 
@@ -170,17 +214,20 @@ impl SpectrumHost {
     /// respond. An `else if` here would hand the write to whichever arm was
     /// written first and lose the other.
     fn io_write(&mut self, port: u16, value: u8) {
-        if port & PAGING_DECODE_MASK == PAGING_DECODE_MATCH {
+        if port & PAGING_DECODE_MASK == PAGING_DECODE_MATCH && self.mem.page(value) {
             self.paging_written = true;
             self.paging_values_seen |= value;
-            self.mem.page(value);
         }
 
         if port & AY_SELECT_DECODE_MASK == AY_SELECT_DECODE_MATCH {
             self.ay_register = value & 0x0F;
         } else if port & 0xC002 == 0x8000 {
-            self.ay_write = Some((self.ay_register, value));
             self.ay_written = true;
+            let register = self.ay_register;
+            if let Some(ay) = &mut self.ay {
+                ay.select_register(register);
+                ay.write_data(value);
+            }
         } else if port & 0x0001 == 0 {
             self.speaker = value & 0x10 != 0;
             self.speaker_written = true;

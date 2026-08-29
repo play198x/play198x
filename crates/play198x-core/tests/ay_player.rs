@@ -4,7 +4,7 @@ mod common;
 
 use common::{FIXTURE_HI_REG, FIXTURE_LO_REG, build_ay, build_ay_songs};
 use play198x_core::host::memory::Memory;
-use play198x_core::host::spectrum::SpectrumHost;
+use play198x_core::host::spectrum::{Ay3_8910, SpectrumHost};
 use play198x_core::player::ay::AyPlayer;
 use play198x_core::player::ay::format::AyError;
 
@@ -690,4 +690,101 @@ fn mirroring_the_window_leaves_the_two_fixed_banks_alone() {
     assert_eq!(mem.read(0xC000), 0x55, "bank 5 lost what was put at 0x4000");
     mem.page(2);
     assert_eq!(mem.read(0xC000), 0x66, "bank 2 lost what was put at 0x8000");
+}
+
+/// Once the tune's routine has returned, nothing of the tune's runs for the
+/// rest of the frame — and that must not depend on what happens to be in
+/// memory at the return address.
+///
+/// A `HALT` byte written at the return address is not a safe way to stop
+/// it, for two independent reasons. A block that covers the address
+/// overwrites it — 57 of the archive's 1,536 playable tunes end a run with
+/// something other than a `HALT` at 0xFFFF, measured against the model that
+/// wrote one, before any banking existed. And 0xFFFF is inside the window a
+/// `$7FFD` write repoints, where banks 2 and 5 carry the file's image of
+/// their own fixed addresses rather than the window's.
+///
+/// A CPU left running from that address executes the tune's data as code
+/// for the rest of every frame, which sounds like a tune playing badly
+/// rather than like a fault. This fixture builds the second case: it pages
+/// bank 5 into the window with a known non-`HALT` byte at the top of it.
+///
+///   init at 0x8000:      C9  RET
+///   interrupt at 0x8010:
+///   3E 5A        LD A,0x5A
+///   32 FF 7F     LD (0x7FFF),A   ; the top byte of bank 5
+///   01 FD 7F     LD BC,0x7FFD
+///   3E 05        LD A,5
+///   ED 79        OUT (C),A       ; bank 5 into the window: 0xFFFF is now
+///                                ; that same byte, and it is not a HALT
+///   C9           RET
+#[test]
+fn nothing_executes_after_the_routine_returns_whatever_is_at_the_sentinel() {
+    let mut code = vec![0u8; 0x20];
+    code[0x00] = 0xC9;
+    code[0x10..0x1D].copy_from_slice(&[
+        0x3E, 0x5A, 0x32, 0xFF, 0x7F, 0x01, 0xFD, 0x7F, 0x3E, 0x05, 0xED, 0x79, 0xC9,
+    ]);
+    let mut player = AyPlayer::new(&build_ay(0x8000, 0x8010, 0x8000, &code), 0, 48_000).unwrap();
+
+    for frame in 1..=3 {
+        assert!(player.frame(), "frame {frame}: the routine returned");
+        assert_eq!(
+            player.host.mem.read(0xFFFF),
+            0x5A,
+            "frame {frame}: the fixture is only meaningful while 0xFFFF is not a HALT"
+        );
+        assert_eq!(
+            player.host.cpu.regs.pc, 0xFFFF,
+            "frame {frame}: the CPU ran on past the address it returned to"
+        );
+    }
+}
+
+/// The host answers the AY's read port itself, so the public `step` gives
+/// one answer rather than one per caller. A chip owned by `AyPlayer` and
+/// patched in afterwards would leave anything else driving the same host
+/// told there is no sound chip.
+///
+///   01 FD FF     LD BC,0xFFFD
+///   3E 07        LD A,7
+///   ED 79        OUT (C),A       ; select R7, the mixer, which keeps all 8 bits
+///   01 FD BF     LD BC,0xBFFD
+///   3E 3E        LD A,0x3E
+///   ED 79        OUT (C),A       ; R7 = 0x3E
+///   01 FD FF     LD BC,0xFFFD
+///   ED 78        IN A,(C)
+///   32 00 90     LD (0x9000),A
+///   76           HALT
+#[test]
+fn the_host_answers_the_ay_port_with_no_player_driving_it() {
+    let program = [
+        0x01, 0xFD, 0xFF, 0x3E, 0x07, 0xED, 0x79, 0x01, 0xFD, 0xBF, 0x3E, 0x3E, 0xED, 0x79, 0x01,
+        0xFD, 0xFF, 0xED, 0x78, 0x32, 0x00, 0x90, 0x76,
+    ];
+
+    let mut fitted = SpectrumHost::new();
+    fitted.ay = Some(Ay3_8910::new(1_773_400, 48_000, 960));
+    fitted.mem.load(0x8000, &program);
+    fitted.cpu.regs.pc = 0x8000;
+    for _ in 0..400 {
+        fitted.step();
+    }
+    assert_eq!(
+        fitted.mem.read(0x9000),
+        0x3E,
+        "a host with a chip fitted must answer its port from the chip"
+    );
+
+    let mut bare = SpectrumHost::new();
+    bare.mem.load(0x8000, &program);
+    bare.cpu.regs.pc = 0x8000;
+    for _ in 0..400 {
+        bare.step();
+    }
+    assert_eq!(
+        bare.mem.read(0x9000),
+        0xFF,
+        "a host with no chip fitted must read as the unattached bus it is"
+    );
 }

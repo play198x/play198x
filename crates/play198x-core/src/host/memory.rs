@@ -129,12 +129,17 @@ impl Memory {
     /// would on the machine — the whole of the run it locked during — and
     /// the next song starts from a cold machine, which is the only thing
     /// "until reset" can mean where nothing is ever reset.
-    pub fn page(&mut self, value: u8) {
+    ///
+    /// Returns whether the latch took the write. A caller counting how much
+    /// of an archive this host has to page for needs that distinction: a
+    /// write the lock discarded changed nothing.
+    pub fn page(&mut self, value: u8) -> bool {
         if self.paging_locked {
-            return;
+            return false;
         }
         self.paged = (value & 0x07) as usize;
         self.paging_locked = value & 0x20 != 0;
+        true
     }
 
     /// Copies whatever the window at `$C000-$FFFF` was loaded with into
@@ -161,7 +166,11 @@ impl Memory {
     /// Banks 2 and 5 are left alone: they have fixed addresses of their own
     /// (`$8000` and `$4000`), which the file addresses separately, and
     /// overwriting either with the window's image would throw away what the
-    /// file put there.
+    /// file put there. That makes this a statement about the six banks it
+    /// names and not about the window: bits 0-2 of `$7FFD` can select bank 2
+    /// or bank 5 into it as well, and those two carry the file's image of
+    /// `$8000` and `$4000` instead. So nothing may depend on a particular
+    /// byte being visible at a particular window address.
     pub fn mirror_window_into_the_pageable_banks(&mut self) {
         let source = (LOW_REGION + 1 + self.paged) * BANK_LEN;
         for bank in PAGEABLE_ONLY_BANKS {

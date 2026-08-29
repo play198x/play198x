@@ -19,7 +19,12 @@ use format::{AyError, AyFile, Song};
 /// T-states in one 50Hz frame on a 128K Spectrum: 228 T-states/line x 311
 /// lines = 70,908, from a 3,546,900Hz CPU clock (≈50.02Hz refresh).
 const T_STATES_PER_FRAME: u32 = 70_908;
-/// Where the stub parks a return address so a call's end is detectable.
+/// The return address `call` pushes, so a routine coming back is
+/// detectable. Nothing is written to this address and nothing may be: it
+/// sits in the 16 KB window a `$7FFD` write repoints, so what is visible
+/// there depends on which RAM bank a tune last selected. `call` watches for
+/// PC reaching it and `frame` stops running the CPU from that point, so the
+/// byte at this address is never fetched.
 const SENTINEL: u16 = 0xFFFF;
 /// How long `new()` gives a tune's init routine to return.
 ///
@@ -150,11 +155,11 @@ pub struct AyPlayer {
     pub host: SpectrumHost,
     song: Song,
     frames_played: u32,
-    chip: Ay3_8910,
     samples_per_frame: usize,
     ay_tick_accumulator: u32,
-    /// Half T-states elapsed — `step_with_chip` increments this once per
-    /// call, and each call is one Rise-or-Fall half-cycle of the Z80 core
+    /// Half T-states elapsed — `idle_cycle` increments this once per call,
+    /// and every host cycle passes through it. Each is one Rise-or-Fall
+    /// half-cycle of the Z80 core
     /// (see [`AY_TICK_DIVISOR`]). Two of these make one real T-state, so
     /// callers compare against `T_STATES_PER_FRAME * 2`.
     ///
@@ -236,23 +241,6 @@ impl AyPlayer {
         for address in 0x0000..0x0100u16 {
             host.mem.write(address, 0xC9);
         }
-        // Once `call()` detects PC == SENTINEL it stops driving the CPU
-        // itself, but `frame()` keeps clocking the whole host afterwards so
-        // the chip gets a full frame's worth of ticks — so SENTINEL must be
-        // somewhere safe to keep fetching from. Left at its default (0x00,
-        // NOP), the fetch after it wraps 0xFFFF -> 0x0000 and lands on the
-        // low-memory RET stub above, which pops whatever the (long-since
-        // restored) stack now holds and sends the CPU off executing tune
-        // data as code. A HALT here parks the CPU on itself instead (the
-        // Z80 core re-fetches NOPs internally without advancing PC while
-        // halted), so `step_with_chip` stays safe to call all the way to
-        // the next frame boundary.
-        //
-        // Written before the blocks load and before the banks are
-        // mirrored, so every bank a tune can page into the window carries
-        // it: SENTINEL is inside that window, and a tune that switched
-        // banks would otherwise land on whatever the new bank holds there.
-        host.mem.write(SENTINEL, 0x76);
         for block in &song.blocks {
             host.mem.load(block.address, &block.data);
         }
@@ -290,11 +278,15 @@ impl AyPlayer {
         host.cpu.regs.iy = reg_pair;
 
         let samples_per_frame = (sample_rate / 50) as usize;
+        // Fitted to the host rather than held here, because the host is what
+        // answers the bus: an `IN` from the AY's port is the machine's
+        // answer to give, and a chip owned by the player would leave
+        // `SpectrumHost::step` answering one thing and this player another.
+        host.ay = Some(Ay3_8910::new(AY_CLOCK_HZ, sample_rate, samples_per_frame));
         let mut player = Self {
             host,
             song,
             frames_played: 0,
-            chip: Ay3_8910::new(AY_CLOCK_HZ, sample_rate, samples_per_frame),
             samples_per_frame,
             ay_tick_accumulator: 0,
             t_states: 0,
@@ -331,11 +323,39 @@ impl AyPlayer {
     pub fn frame(&mut self) -> bool {
         let before = self.t_states;
         let returned = self.call(self.song.interrupt, INTERRUPT_BUDGET);
+        // The routine has returned; the frame has not. The chip and the
+        // beeper still need the rest of the frame's cycles — and the CPU
+        // must not get them. On the machine the player is idle here,
+        // waiting for the next interrupt; there is nothing left for this
+        // tune to execute, and `call` has stopped it at SENTINEL, which is
+        // a return address and not code.
+        //
+        // Nothing is parked at SENTINEL to halt the CPU with, because
+        // nothing at that address can be relied on. A HALT byte written
+        // there is overwritten by any block that covers it: 57 of the
+        // archive's 1,536 playable tunes end a run with something else at
+        // 0xFFFF, measured against the model that wrote one. Banking adds a
+        // second way to lose it — the address is inside the window a
+        // `$7FFD` write repoints, and banks 2 and 5 are not mirrored
+        // because they carry the file's image of their own fixed addresses.
+        //
+        // A CPU left running from there executes the tune's own bytes as
+        // code for the rest of every frame, and that does not sound like a
+        // crash. Ghosts'n'Goblins is the clearest case in the archive: its
+        // play routine never touches the sound chip at all, and every note
+        // it appeared to make came from the runaway. Target Renegade is the
+        // same fault the other way up — six of its eight subtunes rendered
+        // silence while the seventh played the wreckage.
+        //
+        // Only reached when the routine returned early: INTERRUPT_BUDGET is
+        // one frame, so a routine that overran has already consumed the
+        // whole of it and this loop does not run.
+        //
         // `t_states` counts half T-states (see the field doc), so a real
         // frame's worth of T_STATES_PER_FRAME T-states is twice that many
-        // `step_with_chip` calls.
+        // cycles.
         while self.t_states.wrapping_sub(before) < T_STATES_PER_FRAME * 2 {
-            self.step_with_chip();
+            self.idle_cycle();
         }
         self.frames_played += 1;
         returned
@@ -355,7 +375,13 @@ impl AyPlayer {
         // mutably alongside it, and put back before returning. The `Vec`
         // itself is never reallocated, so this moves a header, not data.
         let mut mono = std::mem::take(&mut self.mono);
-        self.chip.end_frame(&mut mono);
+        match &mut self.host.ay {
+            Some(ay) => ay.end_frame(&mut mono),
+            // A host with no chip fitted has no chip audio. Cleared rather
+            // than left as it is: `mem::take` hands back the previous
+            // frame's samples, which would repeat instead of falling silent.
+            None => mono.fill(0.0),
+        }
 
         // AC-couple the chip before anything is mixed into it.
         // `emu198x-gi-ay-3-8910`'s `compute_output` sums three channels from
@@ -401,12 +427,14 @@ impl AyPlayer {
         // rely on it — an AudioWorklet handed a value above 1.0 hard-clips,
         // and this crate should not be the thing that hands it one.
         //
-        // It does engage, rarely. Across the 696-file corpus one file
-        // crosses full scale, peaking at 1.010 before the clamp: a hair's
-        // overshoot caught by the backstop, not a mix with no headroom.
-        // That is visible only through `peak_before_clamp` — a peak taken
-        // from `out` afterwards can never exceed 1.0, so it would report
-        // the clamp's existence rather than the headroom behind it.
+        // It does not currently engage at all. Across all 1,536 playable
+        // tunes in the 696-file corpus nothing exceeds full scale before
+        // the clamp; the loudest sit exactly on 1.0, which is what the DC
+        // blocker returns for a step from silence to the chip's own maximum
+        // (`y = x - prev_x + R*prev_y` with `prev_y` at rest). That is
+        // visible only through `peak_before_clamp` — a peak taken from
+        // `out` afterwards can never exceed 1.0, so it would report the
+        // clamp's existence rather than the headroom behind it.
         let mut frames = 0;
         for (slot, sample) in out.as_chunks_mut::<2>().0.iter_mut().zip(mono.iter()) {
             self.peak_before_clamp = self.peak_before_clamp.max(sample.abs());
@@ -444,12 +472,12 @@ impl AyPlayer {
     /// and `frame()` hands it back to its caller.
     fn call(&mut self, address: u16, budget: u32) -> bool {
         self.host.cpu.regs.pc = address;
-        // A previous frame may have left the CPU halted at SENTINEL (see the
-        // HALT parked there in `new()`): the core's `halt` flag makes every
-        // fetch a phantom NOP regardless of what `regs.pc` points at, and
-        // only an accepted interrupt clears it normally. This player drives
-        // PC directly instead, so it must clear the flag itself or the
-        // routine we are about to "call" would never actually execute.
+        // A routine that ran a HALT of its own and then overran its budget
+        // leaves the flag set: the core's `halt` flag makes every fetch a
+        // phantom NOP regardless of what `regs.pc` points at, and only an
+        // accepted interrupt clears it normally. This player drives PC
+        // directly instead, so it must clear the flag itself or the routine
+        // we are about to "call" would never actually execute.
         self.host.cpu.halt = false;
         let sp_before = self.host.cpu.regs.sp;
         self.host.cpu.regs.sp = sp_before.wrapping_sub(2);
@@ -461,7 +489,19 @@ impl AyPlayer {
 
         for _ in 0..budget {
             self.step_with_chip();
-            if self.host.cpu.regs.pc == SENTINEL {
+            // At an instruction boundary, not on any cycle PC happens to
+            // hold the sentinel. PC moves during an instruction, so a bare
+            // address match can fire on a tune whose code runs through
+            // 0xFFFF and stop it mid-instruction — and `frame` leaves the
+            // CPU wherever this stopped it, so mid-instruction is a state
+            // the next frame would resume from as though it were a fresh
+            // one.
+            //
+            // Costs one bool and closes that off. No tune in the archive
+            // currently trips it: adding this moved no figure in the corpus
+            // sweep, which is the honest reason to keep it — a guard whose
+            // absence is invisible until the day it is not.
+            if self.host.cpu.instruction_complete() && self.host.cpu.regs.pc == SENTINEL {
                 return true;
             }
         }
@@ -477,45 +517,45 @@ impl AyPlayer {
         false
     }
 
-    /// One host cycle, with the chip kept in step and any AY port write
-    /// applied the moment it happens — a write applied a frame late is a
-    /// note in the wrong place.
+    /// One host cycle with the CPU running: the machine executes an
+    /// instruction's worth of bus activity, then the clock, the chip and the
+    /// beeper advance with it.
     ///
-    /// An AY *read* is answered here rather than in `SpectrumHost::step`
-    /// for one reason: the chip lives on this struct, so the host has
-    /// nothing to ask. The host puts `UNATTACHED_BUS` on the bus and names
-    /// the port; this overwrites it for the one port the chip answers. The
-    /// order is safe because the Z80 core latches `data_in` on its next
-    /// `tick()`, which is the next call to this function.
+    /// The AY's ports are the host's to serve, both ways — a read is
+    /// answered inside `SpectrumHost::step` and a write is applied there.
+    /// All this adds is the read-side instrumentation, taken from the answer
+    /// the host has already put on the bus.
     fn step_with_chip(&mut self) {
         self.host.step();
-        self.t_states = self.t_states.wrapping_add(1);
         if let Some(port) = self.host.io_read.take() {
             self.any_port_read = true;
             if port & AY_SELECT_DECODE_MASK == AY_SELECT_DECODE_MATCH {
                 self.ay_read = true;
-                // The chip's selected register follows this host's last
-                // select write. Setting it here as well as on the write
-                // path matters for a tune that selects a register and reads
-                // it back without ever writing data to it — real hardware
-                // answers that, and a chip whose selection only moved on
-                // data writes would not.
-                self.chip.select_register(self.host.ay_register);
-                let value = self.chip.read_data();
-                if value != UNATTACHED_BUS {
+                if self.host.cpu.data_in != UNATTACHED_BUS {
                     self.ay_reads_non_ff += 1;
                 }
-                self.host.cpu.data_in = value;
             }
         }
-        if let Some((register, value)) = self.host.ay_write.take() {
-            self.chip.select_register(register);
-            self.chip.write_data(value);
-        }
+        self.idle_cycle();
+    }
+
+    /// One host cycle with the CPU stopped: the clock, the chip and the
+    /// beeper advance and nothing executes.
+    ///
+    /// What [`AyPlayer::frame`] fills the rest of a frame with once the
+    /// tune's routine has returned, and the second half of every
+    /// `step_with_chip`. The chip is free-running hardware — it keeps
+    /// producing sound between the CPU's visits to it — so a frame is the
+    /// same length in chip ticks and output samples whether the tune's
+    /// routine took two thousand T-states or seventy thousand.
+    fn idle_cycle(&mut self) {
+        self.t_states = self.t_states.wrapping_add(1);
         self.ay_tick_accumulator += 1;
         if self.ay_tick_accumulator >= AY_TICK_DIVISOR {
             self.ay_tick_accumulator = 0;
-            self.chip.tick();
+            if let Some(ay) = &mut self.host.ay {
+                ay.tick();
+            }
         }
         self.sample_beeper();
     }
