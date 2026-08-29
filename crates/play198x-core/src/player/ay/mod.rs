@@ -191,6 +191,9 @@ pub struct AyPlayer {
     /// AC-couples the chip's output, for the same reason and against a
     /// larger offset — see [`AyPlayer::render`].
     ay_dc: DcBlocker,
+    /// The largest absolute sample seen before `render`'s clamp, since
+    /// construction. See [`AyPlayer::peak_before_clamp`].
+    peak_before_clamp: f32,
 }
 
 impl AyPlayer {
@@ -266,6 +269,7 @@ impl AyPlayer {
             beeper_accumulator: 0,
             beeper_dc: DcBlocker::new(sample_rate),
             ay_dc: DcBlocker::new(sample_rate),
+            peak_before_clamp: 0.0,
         };
         let init = if player.song.init == 0 {
             player.song.blocks.first().map_or(0, |b| b.address)
@@ -358,10 +362,17 @@ impl AyPlayer {
         // A backstop, not the mechanism. AC-coupling above is what keeps the
         // mix inside range; this only states the range so a consumer can
         // rely on it — an AudioWorklet handed a value above 1.0 hard-clips,
-        // and this crate should not be the thing that hands it one. With the
-        // coupling in place nothing in the 696-file corpus reaches it.
+        // and this crate should not be the thing that hands it one.
+        //
+        // It does engage, rarely. Across the 696-file corpus one file
+        // crosses full scale, peaking at 1.010 before the clamp: a hair's
+        // overshoot caught by the backstop, not a mix with no headroom.
+        // That is visible only through `peak_before_clamp` — a peak taken
+        // from `out` afterwards can never exceed 1.0, so it would report
+        // the clamp's existence rather than the headroom behind it.
         let mut frames = 0;
         for (slot, sample) in out.as_chunks_mut::<2>().0.iter_mut().zip(mono.iter()) {
+            self.peak_before_clamp = self.peak_before_clamp.max(sample.abs());
             let clamped = sample.clamp(-1.0, 1.0);
             slot[0] = clamped;
             slot[1] = clamped;
@@ -370,6 +381,21 @@ impl AyPlayer {
 
         self.mono = mono;
         frames
+    }
+
+    /// The largest absolute sample this player has produced *before*
+    /// `render`'s clamp, since construction.
+    ///
+    /// A backstop nobody can measure is indistinguishable from one that
+    /// never engages. `render` clamps to `[-1, 1]`, so any peak taken from
+    /// its output is at most 1.0 by construction — a sweep asserting
+    /// "nothing exceeded full scale" against that restates the clamp rather
+    /// than testing the headroom it backs up. This is the number that tells
+    /// the two apart, and `tests/ay_corpus.rs` measures it rather than the
+    /// rendered output for exactly that reason.
+    #[must_use]
+    pub fn peak_before_clamp(&self) -> f32 {
+        self.peak_before_clamp
     }
 
     /// Calls `address` and runs until it returns or `budget` half T-states

@@ -20,12 +20,19 @@
 //! question (does the host run) this slice's other tests already answer
 //! per-song; deferred rather than done here.
 //!
-//! That is a blind spot as well as a saving, and it has a known shape: song
-//! 0's subtune index is 0, so both register halves hold the same byte, and
-//! anything that depends on telling `HiReg` from `LoReg` is invisible from
-//! here whatever this sweep reports. The tests that can see it are in
-//! `tests/ay_format.rs` and `tests/ay_player.rs`, against fixtures whose
-//! two halves differ.
+//! That is a blind spot as well as a saving, but it is a narrower one than
+//! "song 0 is the boring case" suggests. Song 0 is *usually* the case where
+//! the two register halves hold the same byte — a subtune index of 0 in
+//! both — and this sweep cannot distinguish `HiReg` from `LoReg` on those.
+//! Counted rather than assumed: **74 of the 696 files have song 0 with
+//! `byte@+8 != byte@+9`**, so 622 are blind to the field order and 74 are
+//! not. Reading the halves the wrong way round costs those 74 real output,
+//! and this sweep does see that: swapping the offsets takes audible from
+//! 539 to 516 and silent from 14 to 37 (measured 2026-08-29).
+//!
+//! What the sweep still cannot see is field order *as such* — a swap shows
+//! up here as "23 tunes went quiet", which has many other explanations. The
+//! instrument for that is `tests/ay_format.rs`'s literal byte array.
 //!
 //! `#[ignore]`d: it needs the Time Capsule mounted, which CI does not have,
 //! and it reads media that is never committed to this repository — the
@@ -115,11 +122,11 @@ struct PeakBuckets {
     moderate: u32,
     /// (0.6, 1.0]: at or under full scale.
     full: u32,
-    /// (1.0, 1.5]: over full scale, but not by a wide margin. Unreachable
-    /// while `render` clamps its output — kept because a bucket that has to
-    /// stay empty is a cheaper statement of that than a comment is.
+    /// (1.0, 1.5]: over full scale, but not by a wide margin. Reachable
+    /// only because this sweep buckets the pre-clamp peak; one archive file
+    /// lands here.
     hot: u32,
-    /// > 1.5: badly over full scale. Unreachable, like `hot`.
+    /// > 1.5: badly over full scale.
     clipping: u32,
 }
 
@@ -172,6 +179,9 @@ fn the_local_archive_plays() {
     // is the only place across the whole archive that can say how common it
     // is — a stub player raises no `INT`, so a routine waiting on one spins.
     let mut interrupt_overran = 0u32;
+    // The largest pre-clamp sample anywhere in the archive, so the headroom
+    // margin is a number rather than a bucket.
+    let mut max_peak = 0.0f32;
 
     let samples_per_frame = (SAMPLE_RATE / 50) as usize;
     let mut out = vec![0.0f32; samples_per_frame * 2];
@@ -183,15 +193,19 @@ fn the_local_archive_plays() {
             Err(err) => failures.record(&err),
             Ok(mut player) => {
                 parsed += 1;
-                let mut peak = 0.0f32;
                 let mut overran = false;
                 for _ in 0..FRAMES {
                     overran |= !player.frame();
                     player.render(&mut out);
-                    for sample in &out {
-                        peak = peak.max(sample.abs());
-                    }
                 }
+                // Taken before `render`'s clamp, not from `out`. A peak
+                // read back from the rendered output is at most 1.0 by
+                // construction, so bucketing it would make the two
+                // over-full-scale buckets unreachable and the "peaks over
+                // 1.0" line tautologically zero — the metric could not
+                // observe the thing it is named for.
+                let peak = player.peak_before_clamp();
+                max_peak = max_peak.max(peak);
                 peaks.record(peak);
                 if overran {
                     interrupt_overran += 1;
@@ -218,7 +232,7 @@ fn the_local_archive_plays() {
     println!("audible {audible}  silent {}", peaks.silent);
     println!("peak distribution: {peaks:?}");
     println!(
-        "peaks over 1.0 (render clamps, so any of these is a clamp that did not hold): {}/{parsed}",
+        "peaks over 1.0, measured before render's clamp: {}/{parsed}  (largest {max_peak:.4})",
         peaks.over_one()
     );
     println!(
@@ -228,16 +242,18 @@ fn the_local_archive_plays() {
 
     assert!(parsed > 0, "no .ay files were found under {ARCHIVE}");
 
-    // `render` clamps to [-1, 1] and documents that as a backstop rather
-    // than the mechanism — AC-coupling the chip's output is what keeps the
-    // mix inside range. Both halves of that claim are checked here: nothing
-    // in the archive exceeds full scale, on 553 real files rather than on
-    // the argument.
+    // `render` clamps to [-1, 1] as a backstop; AC-coupling the chip's
+    // output is what actually keeps the mix inside range. Measured
+    // pre-clamp on 2026-08-29, the backstop engages on exactly one file, at
+    // a peak of 1.010 — a hair over, not a mix without headroom.
+    //
+    // So the bar is `clipping`, not `over_one`. Asserting nothing exceeds
+    // full scale would be false, and asserting it against post-clamp output
+    // would be true no matter how bad the mix got.
     assert_eq!(
-        peaks.over_one(),
-        0,
-        "render's clamp did not hold on {} of {parsed} files",
-        peaks.over_one()
+        peaks.clipping, 0,
+        "{} of {parsed} files drive the mix past 1.5 before the clamp",
+        peaks.clipping
     );
 
     // `audible / parsed` cannot catch a parser regression on its own: break
@@ -260,15 +276,29 @@ fn the_local_archive_plays() {
     //                           signed/unsigned fallback nor `parse`'s
     //                           allocation caps refuse a real file)
     //   audible 539  silent 14  -> 539/553 = 97.5%
-    //   peaks: silent 14, quiet 32, moderate 248, full 259, hot 0, clipping 0
+    //   peaks (pre-clamp): silent 14, quiet 32, moderate 248, full 258,
+    //                      hot 1, clipping 0; largest 1.0106
     //   interrupt routine overran its frame at least once: 24/553
     //
-    // Those figures are measured on AC-coupled output, which is what makes
-    // the peak metric mean loudness at all: the chip's own mixer sums a
-    // unipolar volume table, so an un-coupled peak counts half its own DC
-    // offset as sound. The high-pass's edge response cuts the other way for
-    // very quiet tunes, lifting a handful clear of the audible threshold
-    // that a raw peak would leave under it.
+    // Where the +24 against the previous 515/38 baseline comes from,
+    // measured one change at a time rather than reasoned about:
+    //   - Reverting the HiReg/LoReg fix alone: audible 516, silent 37. So
+    //     the field-order fix accounts for 23 of the 24. Those are tunes
+    //     whose init routine was handed the wrong register pair and made no
+    //     sound with it.
+    //   - Removing the chip's AC coupling alone: audible 539, silent 14 —
+    //     unchanged. The coupling accounts for none of it. It cannot: the
+    //     filter's gain is at most 2/(1+R) = 1.0023 at 48kHz, so it cannot
+    //     lift anything across a threshold. (That bound is a gain per
+    //     frequency, and is not the 2A/(1+R^N) figure in `BEEPER_GAIN`'s
+    //     doc, which is a square wave's composite peak against its own
+    //     amplitude.)
+    //   - The last 1 is the interrupt budget: 538 before that change, 539
+    //     after.
+    // What the coupling did change is the headroom, which is what it was
+    // for: without it, `full` holds 365 rather than 258, two files exceed
+    // full scale rather than one, and the largest peak is 1.1876 rather
+    // than 1.0106.
     //
     // `AyError::InitDidNotReturn` can only be produced by `new()`'s own
     // `call(init)` — `frame()` discards its `call(interrupt)` result with
