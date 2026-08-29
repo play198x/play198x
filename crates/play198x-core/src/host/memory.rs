@@ -156,12 +156,13 @@ impl Memory {
     /// for. What the banks then do differently is diverge, because a write
     /// lands in the selected bank and stays there.
     ///
-    /// The corpus says this is not a hypothetical. Of the 696 files in the
-    /// World of Spectrum AY archive, one — Wizball, across all 17 of its
-    /// subtunes — pages the window, selecting bank 1; and its single code
-    /// block runs from `$BA91` to `$D970`, six kilobytes of which sit in the
-    /// window. Loading that into bank 0 alone would have the tune page its
-    /// own data out on its first `OUT`.
+    /// The corpus says this is not a hypothetical. Of the 1,536 playable
+    /// songs in the 696-file World of Spectrum AY archive, 19 page the
+    /// window: Wizball's 17 subtunes, which select bank 1, and Raster
+    /// Runner's two, which select bank 4. Wizball is the one that would
+    /// break — its single code block runs from `$BA91` to `$D970`, six
+    /// kilobytes of which sit in the window, so loading that into bank 0
+    /// alone would have it page its own code out on its first `OUT`.
     ///
     /// Banks 2 and 5 are left alone: they have fixed addresses of their own
     /// (`$8000` and `$4000`), which the file addresses separately, and

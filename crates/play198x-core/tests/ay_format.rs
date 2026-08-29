@@ -479,12 +479,12 @@ fn a_pointer_past_the_end_is_an_error_not_a_panic() {
 
 /// `.ay` identification needs no `ay` feature (see `Format::Ay`'s doc).
 /// `tests/probe.rs`'s `an_ay_file_is_identified_by_its_header_alone_with_certainty`
-/// pins that fact against a bare eight-byte magic and nothing else, in a
-/// file that carries no `ay` feature gate at all. This test pins the other
-/// half: a *real*, fully structured `.ay` file — the fixture every other
-/// test in this file also parses — still identifies the same way. Together
-/// they cover "the magic alone is enough" and "a genuine file still carries
-/// it", rather than one test standing in for both.
+/// pins that fact against the magic and a header's worth of length and
+/// nothing else, in a file that carries no `ay` feature gate at all. This
+/// test pins the other half: a *real*, fully structured `.ay` file — the
+/// fixture every other test in this file also parses — still identifies the
+/// same way. Together they cover "the header is enough" and "a genuine file
+/// still carries it", rather than one test standing in for both.
 #[test]
 fn an_ay_file_probes_as_certain() {
     let (format, confidence) = identify(&synthetic_ay()).unwrap();

@@ -67,8 +67,9 @@ pub struct SpectrumHost {
     pub cpu: Z80,
     pub mem: Memory,
     /// The sound chip, if one is fitted. `None` is a host with no AY on the
-    /// board: its port reads as [`UNATTACHED_BUS`] and its writes go
-    /// nowhere, which is what a machine without the chip does.
+    /// board: its port reads as the unattached bus (every line pulled high,
+    /// 0xFF) and its writes go nowhere, which is what a machine without the
+    /// chip does.
     ///
     /// The chip belongs to the host and not to whatever is driving it,
     /// because [`SpectrumHost::step`] has to answer the bus. A chip owned by
@@ -98,8 +99,9 @@ pub struct SpectrumHost {
     /// be told from one that makes no sound at all.
     pub speaker_written: bool,
     /// Set on any write that reaches the 128K memory-paging latch *and is
-    /// acted on* — see [`PAGING_DECODE_MASK`] for which addresses reach it,
-    /// and [`Memory::page`] for when the latch stops accepting writes.
+    /// acted on*. The latch decodes A15 and A1, both low, so `$5FFD` and
+    /// `$3FFD` reach it as much as `$7FFD` does; [`Memory::page`] says when
+    /// it stops accepting writes.
     ///
     /// A write the latch has been locked out of does not count. What this
     /// measures is how much of an archive this host's memory model has to
