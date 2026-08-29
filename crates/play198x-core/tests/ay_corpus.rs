@@ -35,10 +35,13 @@
 //! byte array; this sweep stays a coverage and headroom measurement, not a
 //! correctness proof for any one field.
 //!
-//! Both passes also measure the two pieces of port traffic that separate a
-//! 128K host from a 64 KB one, because both are things a sweep can see and
-//! a unit test cannot: how much of a real archive pages memory, and how
-//! much of it reads the sound chip back.
+//! The all-songs pass also measures the two pieces of port traffic that
+//! separate a 128K host from a 64 KB one, because both are things a sweep
+//! can see and a unit test cannot: how much of a real archive pages memory,
+//! and how much of it reads the sound chip back. Only that pass — the
+//! song-0 figures above it are held byte-for-byte against their own measured
+//! baseline, and adding counters to them would say nothing a pass over every
+//! song does not say better.
 //! - Writes that reach the 128K paging latch, which moves the RAM bank at
 //!   0xC000 (`SpectrumHost::paging_written`, `paging_values_seen`). The
 //!   tunes that do it are listed by name, not just counted: they are the
@@ -371,14 +374,15 @@ fn the_local_archive_plays() {
     // that put five tunes into permanent overrun once passed this sweep
     // with the tune count unmoved.
     //
-    // Measured baseline: 2,701 overrunning frames across 553 tunes, of a
-    // possible 138,250. The bar at 8,000 leaves room for roughly twenty
-    // more tunes whose routine never returns at all (250 frames each)
-    // before it trips, while a bug that sets hundreds of tunes running
-    // loose lands in the tens of thousands.
+    // Measured baseline: 2,968 overrunning frames across 553 tunes, of a
+    // possible 138,250, with 2,000 of those belonging to the 8 tunes whose
+    // routine never returns at all. The bar leaves room for six more such
+    // tunes before it trips — tight enough that a change putting a handful
+    // of tunes into permanent overrun is caught, rather than a bar so
+    // slack it only notices hundreds.
     assert!(
-        overruns.frames < 8_000,
-        "interrupt routines overran {} frames, against a measured baseline of 2,701",
+        overruns.frames < 4_500,
+        "interrupt routines overran {} frames, against a measured baseline of 2,968",
         overruns.frames
     );
 
@@ -396,57 +400,40 @@ fn the_local_archive_plays() {
         "parsed count dropped well below the measured baseline of 553/696: {parsed}"
     );
 
-    // Measured against the real archive on 2026-08-29:
+    // Measured against the real archive on 2026-08-29, on the final host:
     //   parsed 553  failed 143 (all InitDidNotReturn; BadPointer and
     //                           TooLarge are both 0, so neither `follow`'s
     //                           signed/unsigned fallback nor `parse`'s
     //                           allocation caps refuse a real file)
     //   audible 539  silent 14  -> 539/553 = 97.5%
-    //   peaks (pre-clamp): silent 14, quiet 32, moderate 248, full 258,
-    //                      hot 1, clipping 0; largest 1.0106
-    //   interrupt routine overran its frame at least once: 24/553
+    //   peaks (pre-clamp): silent 14, quiet 29, moderate 237, full 273,
+    //                      hot 0, clipping 0; largest exactly 1.0000
+    //   sound source: beeper-only 11  ay-only 527  both 6  neither 9
+    //   overruns: 14 tunes overran at least one frame, 8 of them every
+    //             frame, 2,968 overrunning frames in total
     //
-    // Where the +24 against the previous 515/38 baseline comes from,
-    // measured one change at a time rather than reasoned about:
-    //   - Reverting the HiReg/LoReg fix alone: audible 516, silent 37. So
-    //     the field-order fix accounts for 23 of the 24. Those are tunes
-    //     whose init routine was handed the wrong register pair and made no
-    //     sound with it.
-    //   - Removing the chip's AC coupling alone: audible 539, silent 14 —
-    //     unchanged. The coupling accounts for none of it. It cannot: the
-    //     filter's gain is at most 2/(1+R) = 1.0023 at 48kHz, so it cannot
-    //     lift anything across a threshold. (That bound is a gain per
-    //     frequency, and is not the 2A/(1+R^N) figure in `BEEPER_GAIN`'s
-    //     doc, which is a square wave's composite peak against its own
-    //     amplitude.)
-    //   - The last 1 is the interrupt budget: 538 before that change, 539
-    //     after.
-    // What the coupling did change is the headroom, which is what it was
-    // for: without it, `full` holds 365 rather than 258, two files exceed
-    // full scale rather than one, and the largest peak is 1.1876 rather
-    // than 1.0106.
+    // The 143 are all the tune's *init* routine, not its interrupt routine:
+    // `AyError::InitDidNotReturn` is raised only by `new()`'s own
+    // `call(init)`. `frame()` returns its own `call(interrupt)` result
+    // rather than discarding it, and this sweep counts it — as overrunning
+    // frames, above — but a frame that overran is still played and is not
+    // a parse failure.
     //
-    // `AyError::InitDidNotReturn` can only be produced by `new()`'s own
-    // `call(init)` — `frame()` discards its `call(interrupt)` result with
-    // `let _` and cannot raise it. So all 143 failures here are the tune's
-    // *init* routine, not its interrupt routine, failing to return inside
-    // `CALL_BUDGET`, and what is actually known about why is limited to
-    // three figures, not one flat "expected":
-    //   - 6 of 143 are the budget itself: a follow-up run at 10x and 100x
-    //     `CALL_BUDGET` recovered 3 and 6 of them respectively (143 at 1x,
-    //     140 at 10x, 137 at 100x; restored to 1x, 143 again with a clean
-    //     tree) — real work that simply needed more cycles than a stub init
-    //     is normally given, not tunes waiting on anything.
-    //   - 18 of 143 are provably waiting on a real Z80 `INT` this slice's
-    //     stub player never raises: `call()` exhausted its budget with the
-    //     CPU's `halt` flag set, which only a `HALT` instruction sets and
-    //     only an accepted interrupt clears — out of slice 1 by design, see
-    //     the plan's scope note on the stub player.
-    //   - 125 of 143 exhaust the budget spinning at a fixed PC. Consistent
-    //     with the same INT-wait (a busy-loop polling a flag an interrupt
-    //     handler would set) but *not proof* of it — an unrelated infinite
-    //     loop would look identical from the outside, and this sweep cannot
-    //     currently tell the two apart.
+    // What is known about the 143, rather than one flat "expected":
+    //   - 8 of 143 are the budget itself: a run at 100x `INIT_BUDGET`
+    //     parses 561 rather than 553. Real work that needed more cycles
+    //     than a stub init is normally given, not tunes waiting on
+    //     anything.
+    //   - The rest divide into tunes halted on their own `HALT` and tunes
+    //     spinning at a fixed PC, both consistent with waiting for a 50Hz
+    //     `INT` this stub player never raises. That split was measured at
+    //     18 and 125 against the flat-64KB host and has not been re-derived
+    //     since; the total is 143 either way, and the analysis of the
+    //     later-song failures on the all-songs pass reaches the same place
+    //     by a different route — 67 of those 73 declare their play routine
+    //     at 0x0000 or 0x001B, which is the format's way of saying the init
+    //     routine *is* the player.
+    //
     // Swapping the `HiReg`/`LoReg` field order does not move any figure in
     // this sweep — 143 either way. That is a statement about this sweep, not
     // about the format: it plays song 0 only, and song 0's index is 0, so
@@ -464,15 +451,26 @@ fn the_local_archive_plays() {
         "fewer than 85% of the parsed archive made a sound: {audible}/{parsed}"
     );
 
+    // Tunes whose routine never returns at all, as distinct from one that
+    // occasionally runs long. Measured at 8; the bar leaves room for four
+    // more before it trips, which is the same kind of margin the audible
+    // share above carries.
+    assert!(
+        overruns.always <= 12,
+        "{} tunes overran every one of {FRAMES} frames, against a measured 8",
+        overruns.always
+    );
+
     // ---- Extended sweep: every song of every file, not just song 0 ----
     //
     // A second, independent pass over the same bytes rather than a
     // replacement for the one above: the song-0 pass and its assertions
     // stay exactly as measured, so a regression that shows only on song 0
-    // (or only beyond it) is visible either way. No new assertions are
-    // added here — the figures below are reported, not gated, because a
-    // threshold for them has not been set (see this module's doc and the
-    // decision left to the whole-branch review).
+    // (or only beyond it) is visible either way. This pass carries its own
+    // assertions, at the end and set from its own figures — a pass over
+    // 63.7% of the archive that gated on nothing would be measuring the
+    // majority of the corpus and guarding none of it, which is the gap it
+    // was added to close.
     let mut all_parsed = 0u32;
     let mut all_failures = Failures::default();
     let mut all_peaks = PeakBuckets::default();
@@ -731,6 +729,47 @@ fn the_local_archive_plays() {
         total_songs > 0,
         "no songs were found across the corpus on the all-songs pass"
     );
+
+    // This pass covers the 1,219 songs the song-0 pass never reaches — 63.7%
+    // of the archive — and until now it gated on nothing at all, which left
+    // the majority of the corpus measured and unguarded. The bars below are
+    // its own, set from its own measurement rather than scaled from the
+    // song-0 pass, because the two passes do not fail the same way: a bug
+    // that only shows on a subtune is invisible above and lands here.
+    //
+    // Measured against the real archive on 2026-08-29, on the final host:
+    //   total songs 1,915 across 696 files; 278 files carry more than one
+    //   parsed 1,536  failed 379 (all InitDidNotReturn)
+    //   audible 1,490  silent 46  -> 1,490/1,536 = 97.0%
+    //   peaks (pre-clamp): silent 46, quiet 108, moderate 569, full 813,
+    //                      hot 0, clipping 0; largest exactly 1.0000
+    //   overruns: 85 tunes, 32 of them every frame, 14,085 frames in total
+    assert_eq!(
+        all_peaks.clipping, 0,
+        "{} of {all_parsed} songs drive the mix past 1.5 before the clamp",
+        all_peaks.clipping
+    );
+    assert!(
+        all_parsed >= 1_400,
+        "songs parsed dropped well below the measured baseline of 1,536/1,915: {all_parsed}"
+    );
+    assert!(
+        all_audible * 100 >= all_parsed * 90,
+        "fewer than 90% of the parsed songs made a sound: {all_audible}/{all_parsed}"
+    );
+    // 14,085 of a possible 384,000, with 8,000 of them belonging to the 32
+    // songs whose routine never returns. Room for twenty-three more such
+    // songs before the bar trips.
+    assert!(
+        all_overruns.frames < 20_000,
+        "interrupt routines overran {} frames, against a measured baseline of 14,085",
+        all_overruns.frames
+    );
+    assert!(
+        all_overruns.always <= 45,
+        "{} songs overran every one of {FRAMES} frames, against a measured 32",
+        all_overruns.always
+    );
 }
 
 /// What one walk of the archive produced: every `.ay` file's bytes, plus how
@@ -782,11 +821,18 @@ fn ay_files(root: &Path) -> Walk {
             }
             let lower = path.to_string_lossy().to_ascii_lowercase();
             if lower.ends_with(".ay") {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    walk.files.push(CorpusFile {
-                        name: file_name(&path),
-                        bytes,
-                    });
+                // Through `Container`, like the branch below, and not
+                // `fs::read`. This archive is 696 `.zip` files and no loose
+                // `.ay` at all, so nothing here has ever run — which is
+                // exactly why it should not be the one path in this walk
+                // that reads a whole file of unknown size straight into
+                // memory. `Container::open` handles a plain file and
+                // applies the same cap as the rest.
+                let name = file_name(&path);
+                if let Ok(container) = Container::open(&path)
+                    && let Ok(bytes) = container.read(&name)
+                {
+                    walk.files.push(CorpusFile { name, bytes });
                 }
             } else if lower.ends_with(".zip") {
                 let Ok(container) = Container::open(&path) else {
