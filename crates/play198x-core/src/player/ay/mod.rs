@@ -7,14 +7,13 @@ use format::{AyError, AyFile, Song};
 // `T_STATES_PER_FRAME` and `AY_CLOCK_HZ` must come from the same machine:
 // the AY is 128K-only hardware (an `.ay` file targets the 128K's sound, not
 // the 48K's, which has no AY at all), so both constants below are the 128K
-// Spectrum's. An earlier version of this file paired the 48K's frame length
-// (69,888 T-states, from its 3.5MHz clock) with the 128K's AY clock — two
-// different machines' numbers in one model — which under-fed the chip's
-// downsampler by 524 ticks a frame (a silent gap at the end of every frame:
-// a 50Hz buzz, and playback fractionally slow). Do not "fix" `AY_CLOCK_HZ`
-// downward to make the arithmetic line up instead: it sets the pitch the
-// chip produces, so lowering it would detune every tune to cancel an
-// unrelated error in the frame-length constant.
+// Spectrum's. Pairing the 48K's frame length (69,888 T-states, from its
+// 3.5MHz clock) with the 128K's AY clock puts two machines' numbers in one
+// model and under-feeds the chip's downsampler by 524 ticks a frame: a
+// silent gap at the end of every frame, heard as a 50Hz buzz over playback
+// that is fractionally slow. `AY_CLOCK_HZ` is not the constant to move to
+// make the arithmetic close, either — it sets the pitch the chip produces,
+// so lowering it detunes every tune to cancel an error in the frame length.
 /// T-states in one 50Hz frame on a 128K Spectrum: 228 T-states/line x 311
 /// lines = 70,908, from a 3,546,900Hz CPU clock (≈50.02Hz refresh).
 const T_STATES_PER_FRAME: u32 = 70_908;
@@ -75,13 +74,12 @@ const AY_TICK_DIVISOR: u32 = 4;
 /// roughly 200Hz-4kHz range real beeper music actually occupies — a mild
 /// overshoot, not a headroom cliff.
 ///
-/// The ~0.99 peak measured against `a_beeper_only_tune_is_audible`'s
-/// fixture (see `task-6-report.md`'s fix-round-2 entry) is not
-/// representative of that: the fixture's toggle burst is brief and then
-/// holds for most of a 20ms frame, which behaves close to a ~25Hz square
-/// wave (`N≈960`) — the one point on this curve where `R^N` is small enough
-/// for the peak to approach `2A`. No real beeper engine plays a ~25Hz tone;
-/// it is an artifact of that fixture's shape, not of typical playback.
+/// `a_beeper_only_tune_is_audible`'s fixture measures ~0.99, which is not
+/// representative of that range: its toggle burst is brief and then holds
+/// for most of a 20ms frame, behaving close to a ~25Hz square wave
+/// (`N≈960`) — the one point on this curve where `R^N` is small enough for
+/// the peak to approach `2A`. No real beeper engine plays a ~25Hz tone, so
+/// that figure describes the fixture's shape, not typical playback.
 ///
 /// Left at 0.5 rather than lowered to buy the mix headroom. The corpus is
 /// what settles that: 7 of 553 files drive the chip and the beeper
@@ -339,21 +337,17 @@ impl AyPlayer {
             *sample = self.ay_dc.filter(*sample);
         }
 
-        // A tune that never wrote the speaker port has no beeper signal.
-        // The DC blocker in `sample_beeper` now removes a *held* level's
-        // offset on its own, so this guard is no longer preventing a sticky
-        // DC offset — but it still earns its place: `sample_beeper` runs
-        // unconditionally from the start of playback (the filter has to see
-        // every sample to stay continuous, see its comment), so a tune that
-        // never writes the port is still feeding the filter a constant
-        // -1.0 it was never told to expect. Against the filter's zeroed
-        // initial state that constant looks exactly like an edge, and the
-        // filter answers with its own start-up transient before decaying
-        // away. Without this guard that transient — not a real event —
-        // would leak into the very first frame of every tune with no
-        // beeper output at all. Gating on `speaker_written` keeps such a
-        // tune silent from sample zero, not just "silent after the filter
-        // settles".
+        // A tune that never wrote the speaker port has no beeper signal,
+        // and this gate is what keeps it silent from sample zero rather
+        // than "silent once the filter settles". `sample_beeper` runs
+        // unconditionally from the start of playback — the filter has to
+        // see every sample to stay continuous, see its comment — so a tune
+        // that never touches the port is still feeding it a constant -1.0.
+        // Against the filter's zeroed initial state that constant looks
+        // exactly like an edge, and the filter answers with a start-up
+        // transient that corresponds to no real event. Without this gate
+        // the transient would land in the first frame of every tune that
+        // makes no beeper sound at all.
         if self.host.speaker_written {
             for (sample, beep) in mono.iter_mut().zip(self.beeper.iter()) {
                 *sample += BEEPER_GAIN * beep;

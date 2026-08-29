@@ -121,7 +121,7 @@ fn be16(bytes: &[u8], at: usize) -> Result<u16, AyError> {
 ///
 /// # Why a fallback exists, and why it is safe
 ///
-/// Two files out of the 696 in the corpus Task 8 swept
+/// Two files out of the 696 in the World of Spectrum AY archive
 /// (`games/r/RobinOfTheWood.ay.zip`, `demos/s/SpecialMusicCollection.ay.zip`)
 /// store a block offset whose *signed* reading resolves outside the file —
 /// `RobinOfTheWood.ay`'s song 15, block 0 stores `0xC5BD` (50,621) at file
@@ -163,9 +163,7 @@ fn be16(bytes: &[u8], at: usize) -> Result<u16, AyError> {
 /// metrics are built to notice, not a silent or unsafe outcome) and
 /// because the corpus gave two real files, not zero, as evidence this
 /// case is a genuine forward offset outside the signed range rather than
-/// corruption. See `task-8-report.md` (fix round 1) for the corpus-wide
-/// check confirming every file that parsed before this change still
-/// parses to the same songs afterwards.
+/// corruption.
 fn follow(bytes: &[u8], at: usize) -> Result<usize, AyError> {
     let raw = be16(bytes, at)?;
     let signed_target = at as i64 + (raw as i16) as i64;

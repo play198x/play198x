@@ -265,13 +265,13 @@ fn a_beeper_only_tune_is_audible() {
 }
 
 /// A tune that writes the speaker port once, then never touches it again,
-/// must decay to silence — not hold a constant DC offset forever. Before
-/// this fix, `speaker_written` was a sticky "ever written" flag rather than
-/// "written this frame": it kept mixing a fixed +-BEEPER_GAIN offset into
-/// every frame after a single write. That would have corrupted Task 8's
-/// peak-based audibility sweep over 696 real `.ay` files — every tune that
-/// so much as touched the speaker port once would measure as permanently
-/// audible regardless of what it actually played.
+/// must decay to silence rather than hold a constant DC offset forever.
+///
+/// A held level that keeps mixing a fixed +-BEEPER_GAIN into every later
+/// frame is inaudible as sound and fatal as measurement: `tests/ay_corpus.rs`
+/// judges a tune audible by its peak, so every tune that so much as touched
+/// the port once would measure as permanently audible whatever it actually
+/// played.
 ///
 /// The write itself is real signal (a one-off click, exactly as it would be
 /// on real AC-coupled hardware) and must still be audible; only the *held*
@@ -319,8 +319,8 @@ fn a_speaker_write_once_tune_settles_to_silence() {
 
     // By two frames after the click and onward, nothing has touched the
     // port again: a sticky DC offset would keep every one of these frames
-    // at the same non-zero peak the click left behind, so this is exactly
-    // where the old bug would have shown up.
+    // at the same non-zero peak the click left behind, so this is where it
+    // would show.
     let mut settled_peak = 0.0f32;
     for _ in 0..8 {
         player.frame();

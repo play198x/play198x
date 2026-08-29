@@ -1,8 +1,12 @@
 use crate::host::memory::Memory;
 use emu198x_zilog_z80::{BusOp, Z80};
 
-/// A 48K Spectrum's worth of host: RAM, a Z80, and the two ports a tune can
-/// make a noise with. No ROM, no display, no keyboard, no tape.
+/// The host an `.ay` tune runs on: 64 KB of RAM, a Z80, and the two ports a
+/// tune can make a noise with. No ROM, no display, no keyboard, no tape.
+///
+/// The machine it stands in for is the 128K Spectrum. The AY is 128K-only
+/// hardware — a 48K has no sound chip at all — and `player::ay`'s clock and
+/// frame-length constants are that machine's.
 pub struct SpectrumHost {
     pub cpu: Z80,
     pub mem: Memory,
