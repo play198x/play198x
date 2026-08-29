@@ -254,10 +254,21 @@ fn the_local_archive_plays() {
         "parsed count dropped well below the measured baseline of 553/696: {parsed}"
     );
 
-    // Measured against the real archive on 2026-08-29 (696 files total,
-    // after `follow`'s signed/unsigned-fallback fix — see its own doc):
-    //   parsed 553  failed 143 (all InitDidNotReturn; BadPointer is 0)
-    //   audible 515  silent 38  -> 515/553 = 93.1%
+    // Measured against the real archive on 2026-08-29:
+    //   parsed 553  failed 143 (all InitDidNotReturn; BadPointer and
+    //                           TooLarge are both 0, so neither `follow`'s
+    //                           signed/unsigned fallback nor `parse`'s
+    //                           allocation caps refuse a real file)
+    //   audible 539  silent 14  -> 539/553 = 97.5%
+    //   peaks: silent 14, quiet 32, moderate 248, full 259, hot 0, clipping 0
+    //   interrupt routine overran its frame at least once: 24/553
+    //
+    // Those figures are measured on AC-coupled output, which is what makes
+    // the peak metric mean loudness at all: the chip's own mixer sums a
+    // unipolar volume table, so an un-coupled peak counts half its own DC
+    // offset as sound. The high-pass's edge response cuts the other way for
+    // very quiet tunes, lifting a handful clear of the audible threshold
+    // that a raw peak would leave under it.
     //
     // `AyError::InitDidNotReturn` can only be produced by `new()`'s own
     // `call(init)` — `frame()` discards its `call(interrupt)` result with
@@ -287,7 +298,7 @@ fn the_local_archive_plays() {
     // Field order is settled in `tests/ay_format.rs` against a literal byte
     // array, which is an instrument that can actually see it.
     //
-    // The bar below sits at 85%, comfortably under the measured 93.1%, so a
+    // The bar below sits at 85%, comfortably under the measured 97.5%, so a
     // real regression in host correctness has room to show up before the
     // bar does, without the bar itself being so tight that ordinary archive
     // noise (a handful more real INT-waiting or budget-limited tunes, say)
