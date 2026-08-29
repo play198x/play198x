@@ -182,8 +182,9 @@ struct PeakBuckets {
     /// (0.6, 1.0]: at or under full scale.
     full: u32,
     /// (1.0, 1.5]: over full scale, but not by a wide margin. Reachable
-    /// only because this sweep buckets the pre-clamp peak; one archive file
-    /// lands here.
+    /// only because this sweep buckets the pre-clamp peak. Empty on both
+    /// passes as measured, and asserted empty on both — see the bars at the
+    /// end of each.
     hot: u32,
     /// > 1.5: badly over full scale.
     clipping: u32,
@@ -744,6 +745,55 @@ fn the_local_archive_plays() {
     //   peaks (pre-clamp): silent 46, quiet 108, moderate 569, full 813,
     //                      hot 0, clipping 0; largest exactly 1.0000
     //   overruns: 85 tunes, 32 of them every frame, 14,085 frames in total
+    //
+    // **The four bars marked (discriminating) fail against the host this
+    // branch replaced**, and that has been run rather than reasoned about:
+    // with the frame's trailing cycles clocking the CPU again and the HALT
+    // byte back at the sentinel, this pass reports hot 2, largest 1.0294,
+    // 128 overrunning tunes and 17,599 overrunning frames, and each of the
+    // four trips. A bar nobody has watched fail is a bar nobody has tested,
+    // and the first four written here did not fail against that host at
+    // all — they were decoration on the blind spot this pass exists to
+    // close.
+    //
+    // The other three stay, and are honestly not discriminating: a parse
+    // floor, an audible share and a clipping bar all pass against the
+    // broken host. They guard a different shape of regression — a parser
+    // that stops accepting files, a host that stops making sound, a mix
+    // that loses its headroom — and the fact that one bug got past them is
+    // an argument for the four above, not against these three.
+
+    // (discriminating: 2 on the pre-fix host.) The bucket says how many
+    // songs cross full scale before the clamp; `all_max_peak` below says by
+    // how much. Both, because a single song a hair over and a mix that has
+    // lost its headroom are different faults and should not report
+    // identically.
+    assert_eq!(
+        all_peaks.hot, 0,
+        "{} of {all_parsed} songs exceed full scale before the clamp",
+        all_peaks.hot
+    );
+    // (discriminating: 1.0294 on the pre-fix host.)
+    assert!(
+        all_max_peak <= 1.0,
+        "the loudest song reached {all_max_peak} before the clamp"
+    );
+    // (discriminating: 128 on the pre-fix host.) Measured 85; the bar
+    // leaves room for fifteen more songs whose routine stops returning.
+    assert!(
+        all_overruns.tunes <= 100,
+        "{} songs overran at least one frame, against a measured 85",
+        all_overruns.tunes
+    );
+    // (discriminating: 17,599 on the pre-fix host.) 14,085 of a possible
+    // 384,000, with 8,000 of them belonging to the 32 songs whose routine
+    // never returns. Room for seven more such songs before it trips.
+    assert!(
+        all_overruns.frames < 16_000,
+        "interrupt routines overran {} frames, against a measured baseline of 14,085",
+        all_overruns.frames
+    );
+
     assert_eq!(
         all_peaks.clipping, 0,
         "{} of {all_parsed} songs drive the mix past 1.5 before the clamp",
@@ -757,14 +807,10 @@ fn the_local_archive_plays() {
         all_audible * 100 >= all_parsed * 90,
         "fewer than 90% of the parsed songs made a sound: {all_audible}/{all_parsed}"
     );
-    // 14,085 of a possible 384,000, with 8,000 of them belonging to the 32
-    // songs whose routine never returns. Room for twenty-three more such
-    // songs before the bar trips.
-    assert!(
-        all_overruns.frames < 20_000,
-        "interrupt routines overran {} frames, against a measured baseline of 14,085",
-        all_overruns.frames
-    );
+    // Not discriminating either, and in the other direction: the pre-fix
+    // host reported 21 against this host's 32, because stopping the CPU
+    // running loose made ten beeper routines' permanent overruns visible
+    // as permanent. It guards the future rather than the past.
     assert!(
         all_overruns.always <= 45,
         "{} songs overran every one of {FRAMES} frames, against a measured 32",
