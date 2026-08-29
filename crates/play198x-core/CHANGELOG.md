@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **the `ay` host has the 128K Spectrum's memory.** It had been claiming to be
+  a 128K in its frame length and its AY clock while its RAM was a flat 64 KB
+  with no banking, so a tune that paged memory ran code the host quietly threw
+  away. There are now eight 16 KB RAM banks: bank 5 fixed at `$4000`, bank 2 at
+  `$8000`, and port `$7FFD` choosing which bank shows through `$C000-$FFFF`.
+  The latch is decoded as the hardware decodes it — A15 and A1 low, so `$5FFD`
+  and `$3FFD` reach it too — and bit 5 locks paging for the rest of the song,
+  there being no reset short of starting the next one. `$0000-$3FFF` stays RAM
+  whatever the ROM-select bit asks for: there is no ROM to page in, and that
+  region holds the `RET` stub the `.ay` format's player is required to supply.
+  An `.ay` block names an address and never a bank, so the file's image of
+  `$C000-$FFFF` is what every pageable bank starts with — otherwise a tune that
+  pages would find its own code gone.
+- **`IN` from the AY's register port returns the selected register.** It used
+  to answer `0xFF`, which is the right answer for a port with nothing behind it
+  and the wrong one for the port the sound chip is on: it tells a tune probing
+  for the chip that there is no chip. Every other port still reads as the
+  unattached bus it is.
+
+### Changed
+
+- **Breaking: `AyPlayer::fffd_read` and `AyPlayer::fffd_read_would_differ` are
+  now `ay_read` and `ay_reads_non_ff`.** Both are corpus-sweep instrumentation
+  that no production code reads. The old pair counted what a read *would* have
+  returned had the chip been asked; the chip is asked now, so the counter
+  reports what reads actually got.
+
 ## [0.2.0](https://github.com/play198x/play198x/compare/play198x-core-v0.1.3...play198x-core-v0.2.0) - 2026-08-29
 
 ### Added
