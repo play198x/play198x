@@ -11,6 +11,13 @@ pub struct SpectrumHost {
     /// Latest value written to an AY register, and which one — drained by the
     /// player, which owns the chip.
     pub ay_write: Option<(u8, u8)>,
+    /// Set on any write to an AY data register (port 0xBFFD). Mirrors
+    /// `speaker_written` for the same reason: `ay_write` above is drained
+    /// every host cycle by the player that owns the chip, so nothing
+    /// survives in it to inspect once playback has run — this is what a
+    /// caller checks afterwards to tell a tune that drives the chip from one
+    /// that only ever selects a register, or never touches the AY at all.
+    pub ay_written: bool,
     /// Bit 4 of the last write to port 0xFE: the speaker. This is the whole
     /// of the beeper.
     pub speaker: bool,
@@ -33,6 +40,7 @@ impl SpectrumHost {
             mem: Memory::new(),
             ay_register: 0,
             ay_write: None,
+            ay_written: false,
             speaker: false,
             speaker_written: false,
         }
@@ -64,6 +72,7 @@ impl SpectrumHost {
             self.ay_register = value & 0x0F;
         } else if port & 0xC002 == 0x8000 {
             self.ay_write = Some((self.ay_register, value));
+            self.ay_written = true;
         } else if port & 0x0001 == 0 {
             self.speaker = value & 0x10 != 0;
             self.speaker_written = true;
