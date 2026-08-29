@@ -1,6 +1,5 @@
 #![cfg(feature = "ay")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use play198x_core::metadata::ay_meta;
 use play198x_core::player::ay::format::{
     AyError, MAX_BLOCK_BYTES, MAX_BLOCKS, MAX_STRING_BYTES, MAX_STRING_LEN, parse,
 };
@@ -493,16 +492,7 @@ fn an_ay_file_probes_as_certain() {
     assert_eq!(confidence, Confidence::Certain);
 }
 
-#[test]
-fn ay_metadata_reports_the_song_names() {
-    let file = parse(&synthetic_ay()).unwrap();
-    let meta = ay_meta(&file);
-
-    assert_eq!(meta.author, "Steve");
-    assert_eq!(meta.misc, "notes");
-    assert_eq!(meta.songs, vec!["Test Tune".to_string()]);
-    // `.ay` has no file-level title; song 0's name and length stand in for
-    // one, per `AyMeta`'s doc.
-    assert_eq!(meta.title, "Test Tune");
-    assert_eq!(meta.length_frames, 500);
-}
+// `ay_meta`'s output is pinned in `tests/metadata.rs`, by
+// `ay_meta_reports_the_first_songs_name_as_the_title`. It asserted the same
+// five fields against the same fixture as this file did, and only that one
+// also covers the `Metadata::Ay` wrapping, so the pair collapsed into it.
