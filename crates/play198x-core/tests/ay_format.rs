@@ -1,6 +1,8 @@
 #![cfg(feature = "ay")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+use play198x_core::metadata::ay_meta;
 use play198x_core::player::ay::format::{AyError, parse};
+use play198x_core::probe::{Confidence, Format, identify};
 
 mod common;
 
@@ -50,4 +52,31 @@ fn a_pointer_past_the_end_is_an_error_not_a_panic() {
         parse(&bytes).is_err(),
         "expected an error for a file of {n} bytes"
     );
+}
+
+/// `.ay` identification needs no `ay` feature (see `Format::Ay`'s doc), so
+/// `tests/probe.rs` pins the same fact against a bare eight-byte magic with
+/// no feature enabled at all. This test pins it against a *real*, fully
+/// structured `.ay` file — the fixture every other test in this file also
+/// parses — so the two together cover both "the magic alone is enough" and
+/// "a genuine file still carries it".
+#[test]
+fn an_ay_file_probes_as_certain() {
+    let (format, confidence) = identify(&synthetic_ay()).unwrap();
+    assert_eq!(format, Format::Ay);
+    assert_eq!(confidence, Confidence::Certain);
+}
+
+#[test]
+fn ay_metadata_reports_the_song_names() {
+    let file = parse(&synthetic_ay()).unwrap();
+    let meta = ay_meta(&file);
+
+    assert_eq!(meta.author, "Steve");
+    assert_eq!(meta.misc, "notes");
+    assert_eq!(meta.songs, vec!["Test Tune".to_string()]);
+    // `.ay` has no file-level title; song 0's name and length stand in for
+    // one, per `AyMeta`'s doc.
+    assert_eq!(meta.title, "Test Tune");
+    assert_eq!(meta.length_frames, 500);
 }

@@ -11,6 +11,14 @@ use format198x_commodore_amiga_ilbm::{Compression, Ilbm};
 use format198x_commodore_amiga_mod::MAGIC_OFFSET;
 use play198x_core::probe::{Confidence, Format, identify};
 
+// `common::build_ay` is the one place this repository writes the `.ay` byte
+// layout down (song table, pointers, code block — see its own doc). This
+// file has no `#[cfg(feature = "ay")]` gate anywhere in it, so pulling that
+// helper in here rather than restating a header inline is what proves
+// `Format::Ay` is identified without the `ay` feature, and without a second,
+// driftable copy of the layout `common::build_ay` already owns.
+mod common;
+
 /// A four-channel `M.K.` module: one square-wave sample, one pattern, a C-2 on
 /// channel 0 at row 0. The shape is the MOD crate's own test fixture, so what
 /// `probe` accepts is what that crate can actually decode.
@@ -90,6 +98,26 @@ fn an_ilbm_is_identified_by_its_form_type_with_certainty() {
     assert_eq!(
         identify(&synthetic_ilbm(32, 16)),
         Some((Format::Ilbm, Confidence::Certain))
+    );
+}
+
+#[test]
+fn an_ay_file_is_identified_by_its_header_with_certainty() {
+    // `Format::Ay`'s rule is deliberately not behind the `ay` feature (see
+    // its doc on `probe::Format`): naming an `.ay` costs eight byte
+    // comparisons, not a Z80 or an AY chip. This test file carries no `ay`
+    // feature gate at all, so a pass here — in whichever configuration this
+    // crate happens to be built with — is what proves that identification
+    // really is reachable without the feature that plays the tune, not just
+    // reachable in the gated `tests/ay_format.rs`.
+    assert_eq!(
+        identify(&common::build_ay(
+            0x8000,
+            0x8010,
+            0x8000,
+            &[0xAA, 0xBB, 0xCC, 0xDD]
+        )),
+        Some((Format::Ay, Confidence::Certain))
     );
 }
 
@@ -198,10 +226,10 @@ fn identify_never_panics_on_arbitrary_input() {
     // nothing crashed, and would keep passing if `identify` returned `None`
     // unconditionally; a sweep that asserts merely "something matched" would
     // keep passing if it started matching everything. Measured 2026-08-26 from
-    // this list: uniform fills carry no magic, so ProTracker and ILBM are
-    // unreachable here, and the only load address a uniform fill can spell is
-    // 0x0000 — which is neither C64 format's. What is left is the length-only
-    // rule, hit six times over at 6,912 bytes.
+    // this list: uniform fills carry no magic, so ProTracker, ILBM and `.ay`
+    // are unreachable here, and the only load address a uniform fill can
+    // spell is 0x0000 — which is neither C64 format's. What is left is the
+    // length-only rule, hit six times over at 6,912 bytes.
     let expected: std::collections::BTreeSet<String> = ["Scr/Probable".to_owned()].into();
     assert_eq!(hit, expected);
 }
@@ -209,11 +237,16 @@ fn identify_never_panics_on_arbitrary_input() {
 #[test]
 fn a_uniform_sweep_reaches_every_rule_once_the_signals_are_real() {
     // The counterpart to the sweep above: the same shape of loop over fixtures
-    // that do carry the signals, so all five rules are pinned to a positive
+    // that do carry the signals, so all six rules are pinned to a positive
     // identification rather than only the one a uniform fill can reach.
-    let cases: [(Vec<u8>, Format, Confidence); 5] = [
+    let cases: [(Vec<u8>, Format, Confidence); 6] = [
         (synthetic_module(), Format::ProTracker, Confidence::Certain),
         (synthetic_ilbm(32, 16), Format::Ilbm, Confidence::Certain),
+        (
+            common::build_ay(0x8000, 0x8010, 0x8000, &[0xAA, 0xBB, 0xCC, 0xDD]),
+            Format::Ay,
+            Confidence::Certain,
+        ),
         (synthetic_koala(), Format::Koala, Confidence::Certain),
         (
             synthetic_art_studio(format198x_commodore_c64_art_studio::FILE_LEN),
