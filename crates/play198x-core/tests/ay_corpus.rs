@@ -11,28 +11,37 @@
 //! clamp yet — a decision deferred to the whole-branch review until this
 //! sweep supplied the real numbers to decide it with).
 //!
-//! **Only song 0 of each file is ever played** (`AyPlayer::new(&bytes, 0,
-//! ...)`). The archive holds 1,915 songs across these 696 files and 278 of
-//! them carry more than one song, so every percentage this sweep prints
-//! describes *first songs only* — 1,219 songs, 63.7% of the archive's total
-//! tune count, are never exercised by this test at all. Playing every song
-//! would multiply the sweep's runtime by roughly the same factor for a
-//! question (does the host run) this slice's other tests already answer
-//! per-song; deferred rather than done here.
+//! This sweep runs two passes over the same archive. The first plays only
+//! song 0 of each file (`AyPlayer::new(&bytes, 0, ...)`) — cheap, and kept
+//! as the sweep's original figures so a regression against the measured
+//! baselines in its assertions stays visible on its own. The second plays
+//! *every* song of every file: the archive holds 1,915 songs across these
+//! 696 files and 278 of them carry more than one song, so a song-0-only
+//! sweep never exercised 1,219 songs — 63.7% of the archive's total tune
+//! count. That is not a hypothetical gap: it is exactly what let a
+//! `HiReg`/`LoReg` byte-swap bug survive four separate reviews, because
+//! song 0 is *usually* the one case where the two register halves hold the
+//! same byte (a subtune index of 0 in both) and so is blind to which
+//! half is which. Counted rather than assumed: **74 of the 696 files have
+//! song 0 with `byte@+8 != byte@+9`**, so 622 were blind to the field
+//! order and 74 were not — the swap was a no-op for the 622 and wrong
+//! output for the 74, and playing every song is what finally exercises the
+//! other 1,219.
 //!
-//! That is a blind spot as well as a saving, but it is a narrower one than
-//! "song 0 is the boring case" suggests. Song 0 is *usually* the case where
-//! the two register halves hold the same byte — a subtune index of 0 in
-//! both — and this sweep cannot distinguish `HiReg` from `LoReg` on those.
-//! Counted rather than assumed: **74 of the 696 files have song 0 with
-//! `byte@+8 != byte@+9`**, so 622 are blind to the field order and 74 are
-//! not. Reading the halves the wrong way round costs those 74 real output,
-//! and this sweep does see that: swapping the offsets takes audible from
-//! 539 to 516 and silent from 14 to 37 (measured 2026-08-29).
+//! What a song-0-only sweep still could not see is field order *as such* —
+//! a swap shows up here as "N tunes went quiet", which has many other
+//! explanations. The instrument for that is `tests/ay_format.rs`'s literal
+//! byte array; this sweep stays a coverage and headroom measurement, not a
+//! correctness proof for any one field.
 //!
-//! What the sweep still cannot see is field order *as such* — a swap shows
-//! up here as "23 tunes went quiet", which has many other explanations. The
-//! instrument for that is `tests/ay_format.rs`'s literal byte array.
+//! Both passes also count port traffic this host does not model correctly
+//! yet, without changing how it answers either kind:
+//! - Writes to port 0x7FFD, the 128K memory-paging port this host's flat
+//!   64 KB cannot act on (`SpectrumHost::paging_written`,
+//!   `paging_values_seen`).
+//! - Reads of any port, and specifically of 0xFFFD, the AY's data-read
+//!   port, which this host always answers with a blanket 0xFF
+//!   (`AyPlayer::any_port_read`, `fffd_read`, `fffd_read_would_differ`).
 //!
 //! `#[ignore]`d: it needs the Time Capsule mounted, which CI does not have,
 //! and it reads media that is never committed to this repository — the
@@ -41,11 +50,12 @@
 //! Run with:
 //!   cargo test -p play198x-core --features ay --test ay_corpus -- --ignored --nocapture
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use play198x_core::container::Container;
 use play198x_core::player::ay::AyPlayer;
-use play198x_core::player::ay::format::AyError;
+use play198x_core::player::ay::format::{self, AyError};
 
 /// Where the World of Spectrum AY archive is mounted on this machine.
 const ARCHIVE: &str = "/Volumes/Data/WOS-Archive/music/ay";
@@ -188,8 +198,10 @@ fn the_local_archive_plays() {
 
     let walk = ay_files(&root);
 
-    for bytes in walk.files {
-        match AyPlayer::new(&bytes, 0, SAMPLE_RATE) {
+    // Borrowed rather than consumed: the extended, every-song pass below
+    // walks the same bytes again.
+    for bytes in &walk.files {
+        match AyPlayer::new(bytes, 0, SAMPLE_RATE) {
             Err(err) => failures.record(&err),
             Ok(mut player) => {
                 parsed += 1;
@@ -336,6 +348,205 @@ fn the_local_archive_plays() {
     assert!(
         audible * 100 >= parsed * 85,
         "fewer than 85% of the parsed archive made a sound: {audible}/{parsed}"
+    );
+
+    // ---- Extended sweep: every song of every file, not just song 0 ----
+    //
+    // A second, independent pass over the same bytes rather than a
+    // replacement for the one above: the song-0 pass and its assertions
+    // stay exactly as measured, so a regression that shows only on song 0
+    // (or only beyond it) is visible either way. No new assertions are
+    // added here — the figures below are reported, not gated, because a
+    // threshold for them has not been set (see this module's doc and the
+    // decision left to the whole-branch review).
+    let mut all_parsed = 0u32;
+    let mut all_failures = Failures::default();
+    let mut all_peaks = PeakBuckets::default();
+    let mut all_beeper_only = 0u32;
+    let mut all_ay_only = 0u32;
+    let mut all_both = 0u32;
+    let mut all_neither = 0u32;
+    let mut all_interrupt_overran = 0u32;
+    let mut all_max_peak = 0.0f32;
+    let mut total_songs = 0u32;
+    let mut multi_song_files = 0u32;
+    // A file whose bytes `format::parse` itself refuses. Counted apart from
+    // `all_failures`, which is per-*song*: this sweep cannot know how many
+    // songs such a file would have claimed, so it contributes nothing to
+    // `total_songs` either.
+    let mut file_parse_failed = 0u32;
+    // A file where song 0 played but a later song in the same file did
+    // not — the shape of thing a song-0-only sweep can never report on its
+    // own, counted once per file regardless of how many later songs failed.
+    let mut later_song_failed_after_song0_ok = 0u32;
+
+    // Port 0x7FFD (128K paging) writes — see `SpectrumHost::paging_written`
+    // and `paging_values_seen`'s docs for what is and is not recorded.
+    let mut paging_written_tunes = 0u32;
+    let mut paging_default_only_tunes = 0u32;
+    let mut paging_nondefault_tunes = 0u32;
+    let mut paging_nondefault_values: BTreeSet<u8> = BTreeSet::new();
+
+    // Port reads — see `AyPlayer::any_port_read`, `fffd_read` and
+    // `fffd_read_would_differ`'s docs.
+    let mut any_port_read_tunes = 0u32;
+    let mut fffd_read_tunes = 0u32;
+    let mut fffd_read_would_differ_tunes = 0u32;
+    let mut fffd_read_would_differ_events = 0u64;
+
+    for bytes in &walk.files {
+        let file = match format::parse(bytes) {
+            Ok(file) => file,
+            Err(_) => {
+                file_parse_failed += 1;
+                continue;
+            }
+        };
+        total_songs += file.songs.len() as u32;
+        if file.songs.len() > 1 {
+            multi_song_files += 1;
+        }
+        let mut song0_ok = false;
+        let mut later_song_failed = false;
+        for song_idx in 0..file.songs.len() {
+            match AyPlayer::new(bytes, song_idx, SAMPLE_RATE) {
+                Err(err) => {
+                    all_failures.record(&err);
+                    if song_idx > 0 && song0_ok {
+                        later_song_failed = true;
+                    }
+                }
+                Ok(mut player) => {
+                    if song_idx == 0 {
+                        song0_ok = true;
+                    }
+                    all_parsed += 1;
+                    let mut overran = false;
+                    for _ in 0..FRAMES {
+                        overran |= !player.frame();
+                        player.render(&mut out);
+                    }
+                    let peak = player.peak_before_clamp();
+                    all_max_peak = all_max_peak.max(peak);
+                    all_peaks.record(peak);
+                    if overran {
+                        all_interrupt_overran += 1;
+                    }
+                    match (player.host.speaker_written, player.host.ay_written) {
+                        (true, true) => all_both += 1,
+                        (true, false) => all_beeper_only += 1,
+                        (false, true) => all_ay_only += 1,
+                        (false, false) => all_neither += 1,
+                    }
+                    if player.host.paging_written {
+                        paging_written_tunes += 1;
+                        if player.host.paging_values_seen == 0 {
+                            paging_default_only_tunes += 1;
+                        } else {
+                            paging_nondefault_tunes += 1;
+                            paging_nondefault_values.insert(player.host.paging_values_seen);
+                        }
+                    }
+                    if player.any_port_read {
+                        any_port_read_tunes += 1;
+                    }
+                    if player.fffd_read {
+                        fffd_read_tunes += 1;
+                        if player.fffd_read_would_differ > 0 {
+                            fffd_read_would_differ_tunes += 1;
+                            fffd_read_would_differ_events +=
+                                u64::from(player.fffd_read_would_differ);
+                        }
+                    }
+                }
+            }
+        }
+        if later_song_failed {
+            later_song_failed_after_song0_ok += 1;
+        }
+    }
+
+    let all_audible = all_parsed - all_peaks.silent;
+
+    println!();
+    println!("--- ay corpus sweep: all songs, not just song 0 ---");
+    println!(
+        "files with a file-level parse failure (song count unknown, excluded from total_songs): {file_parse_failed}"
+    );
+    println!("total songs across the corpus: {total_songs}  multi-song files: {multi_song_files}");
+    println!("parsed {all_parsed}  failed {}", all_failures.total());
+    println!("failure breakdown: {all_failures:?}");
+    println!("audible {all_audible}  silent {}", all_peaks.silent);
+    println!("peak distribution: {all_peaks:?}");
+    println!(
+        "peaks over 1.0, measured before render's clamp: {}/{all_parsed}  (largest {all_max_peak:.4})",
+        all_peaks.over_one()
+    );
+    println!(
+        "sound source: beeper-only {all_beeper_only}  ay-only {all_ay_only}  both {all_both}  neither {all_neither}"
+    );
+    println!(
+        "interrupt routine overran its frame at least once: {all_interrupt_overran}/{all_parsed}"
+    );
+
+    println!();
+    println!("--- divergence from the song-0-only pass above ---");
+    println!(
+        "files where song 0 played but a later song in the same file did not: {later_song_failed_after_song0_ok}"
+    );
+    for (name, song0_count, all_count) in [
+        (
+            "NotAnAyFile",
+            failures.not_an_ay_file,
+            all_failures.not_an_ay_file,
+        ),
+        ("Truncated", failures.truncated, all_failures.truncated),
+        ("BadPointer", failures.bad_pointer, all_failures.bad_pointer),
+        (
+            "NoSuchSong",
+            failures.no_such_song,
+            all_failures.no_such_song,
+        ),
+        (
+            "InitDidNotReturn",
+            failures.init_did_not_return,
+            all_failures.init_did_not_return,
+        ),
+        ("TooLarge", failures.too_large, all_failures.too_large),
+    ] {
+        if song0_count == 0 && all_count > 0 {
+            println!("new failure variant beyond song 0: {name} ({all_count}, zero on song 0)");
+        }
+    }
+    println!("max peak before clamp: song 0 only {max_peak:.4}  all songs {all_max_peak:.4}");
+    println!(
+        "peaks.hot: song 0 only {}  all songs {}",
+        peaks.hot, all_peaks.hot
+    );
+    println!(
+        "peaks.clipping: song 0 only {}  all songs {}",
+        peaks.clipping, all_peaks.clipping
+    );
+
+    println!();
+    println!("--- port 0x7FFD (128K paging) writes ---");
+    println!("tunes that write 0x7FFD at all: {paging_written_tunes}/{all_parsed}");
+    println!("  wrote only the power-on default (0x00): {paging_default_only_tunes}");
+    println!(
+        "  wrote something else at least once: {paging_nondefault_tunes}  (distinct OR'd nonzero values seen, per tune: {paging_nondefault_values:?})"
+    );
+
+    println!();
+    println!("--- port reads (this host answers every one with a blanket 0xFF) ---");
+    println!("tunes that read any I/O port at all: {any_port_read_tunes}/{all_parsed}");
+    println!("tunes that read port 0xFFFD specifically: {fffd_read_tunes}/{all_parsed}");
+    println!(
+        "  of those, tunes where read_data() would ever have differed from 0xFF: {fffd_read_would_differ_tunes}/{fffd_read_tunes}  (total differing read events across those tunes: {fffd_read_would_differ_events})"
+    );
+
+    assert!(
+        total_songs > 0,
+        "no songs were found across the corpus on the all-songs pass"
     );
 }
 

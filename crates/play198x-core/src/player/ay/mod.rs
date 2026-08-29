@@ -194,6 +194,37 @@ pub struct AyPlayer {
     /// The largest absolute sample seen before `render`'s clamp, since
     /// construction. See [`AyPlayer::peak_before_clamp`].
     peak_before_clamp: f32,
+    /// Whether this tune ever read any I/O port during playback. Every
+    /// read answers a blanket 0xFF regardless of the port
+    /// (`SpectrumHost::step`), so this alone says nothing about
+    /// correctness — it exists so `tests/ay_corpus.rs`'s sweep can measure
+    /// how many real tunes look at an `IN` result at all, before the two
+    /// fields below narrow that down to the one port a real chip could
+    /// actually answer. No production code reads it.
+    pub any_port_read: bool,
+    /// Whether this tune ever read port 0xFFFD — the AY's data-read port
+    /// on real hardware (`emu198x-gi-ay-3-8910`'s doc: "Data read: IN from
+    /// port $FFFD"). No production code reads it.
+    pub fffd_read: bool,
+    /// How many reads of port 0xFFFD would have returned something other
+    /// than the blanket 0xFF this host actually answers with, had
+    /// [`Ay3_8910::read_data`] been consulted instead.
+    ///
+    /// Computed by syncing the chip's selected register to whatever this
+    /// host's most recent 0xFFFD *write* selected (`host.ay_register`) and
+    /// then calling `read_data()` — the correct read semantics on real
+    /// hardware even when no data write to 0xBFFD ever followed the
+    /// select, so this does not undercount tunes relying on read-back.
+    /// Syncing the selection this way has no effect on playback: it only
+    /// changes what a *read* sees, and `step_with_chip`'s existing write
+    /// path already re-selects the same register from `host.ay_register`
+    /// before every real `write_data` call regardless.
+    ///
+    /// Not acted on — `SpectrumHost` still answers every read with 0xFF no
+    /// matter what this counts to. See `tests/ay_corpus.rs`'s module doc
+    /// for why that stays a follow-up rather than being decided here. No
+    /// production code reads it.
+    pub fffd_read_would_differ: u32,
 }
 
 impl AyPlayer {
@@ -270,6 +301,9 @@ impl AyPlayer {
             beeper_dc: DcBlocker::new(sample_rate),
             ay_dc: DcBlocker::new(sample_rate),
             peak_before_clamp: 0.0,
+            any_port_read: false,
+            fffd_read: false,
+            fffd_read_would_differ: 0,
         };
         let init = if player.song.init == 0 {
             player.song.blocks.first().map_or(0, |b| b.address)
@@ -446,6 +480,20 @@ impl AyPlayer {
     fn step_with_chip(&mut self) {
         self.host.step();
         self.t_states = self.t_states.wrapping_add(1);
+        if let Some(port) = self.host.io_read.take() {
+            self.any_port_read = true;
+            if port == 0xFFFD {
+                self.fffd_read = true;
+                // Sync the chip's own idea of which register is selected to
+                // what this host's last 0xFFFD write actually asked for —
+                // see `fffd_read_would_differ`'s doc for why this is safe
+                // and why it does not undercount.
+                self.chip.select_register(self.host.ay_register);
+                if self.chip.read_data() != 0xFF {
+                    self.fffd_read_would_differ += 1;
+                }
+            }
+        }
         if let Some((register, value)) = self.host.ay_write.take() {
             self.chip.select_register(register);
             self.chip.write_data(value);
