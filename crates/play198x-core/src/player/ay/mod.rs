@@ -1,6 +1,8 @@
 pub mod format;
 
-use crate::host::spectrum::SpectrumHost;
+use crate::host::spectrum::{
+    AY_SELECT_DECODE_MASK, AY_SELECT_DECODE_MATCH, SpectrumHost, UNATTACHED_BUS,
+};
 use emu198x_gi_ay_3_8910::Ay3_8910;
 use format::{AyError, AyFile, Song};
 
@@ -194,37 +196,27 @@ pub struct AyPlayer {
     /// The largest absolute sample seen before `render`'s clamp, since
     /// construction. See [`AyPlayer::peak_before_clamp`].
     peak_before_clamp: f32,
-    /// Whether this tune ever read any I/O port during playback. Every
-    /// read answers a blanket 0xFF regardless of the port
-    /// (`SpectrumHost::step`), so this alone says nothing about
+    /// Whether this tune ever read any I/O port during playback. Every port
+    /// but the AY's answers `UNATTACHED_BUS` regardless of which one it is
+    /// (`SpectrumHost::step`), so this counts curiosity rather than
     /// correctness — it exists so `tests/ay_corpus.rs`'s sweep can measure
     /// how many real tunes look at an `IN` result at all, before the two
-    /// fields below narrow that down to the one port a real chip could
-    /// actually answer. No production code reads it.
-    pub any_port_read: bool,
-    /// Whether this tune ever read port 0xFFFD — the AY's data-read port
-    /// on real hardware (`emu198x-gi-ay-3-8910`'s doc: "Data read: IN from
-    /// port $FFFD"). No production code reads it.
-    pub fffd_read: bool,
-    /// How many reads of port 0xFFFD would have returned something other
-    /// than the blanket 0xFF this host actually answers with, had
-    /// [`Ay3_8910::read_data`] been consulted instead.
-    ///
-    /// Computed by syncing the chip's selected register to whatever this
-    /// host's most recent 0xFFFD *write* selected (`host.ay_register`) and
-    /// then calling `read_data()` — the correct read semantics on real
-    /// hardware even when no data write to 0xBFFD ever followed the
-    /// select, so this does not undercount tunes relying on read-back.
-    /// Syncing the selection this way has no effect on playback: it only
-    /// changes what a *read* sees, and `step_with_chip`'s existing write
-    /// path already re-selects the same register from `host.ay_register`
-    /// before every real `write_data` call regardless.
-    ///
-    /// Not acted on — `SpectrumHost` still answers every read with 0xFF no
-    /// matter what this counts to. See `tests/ay_corpus.rs`'s module doc
-    /// for why that stays a follow-up rather than being decided here. No
+    /// fields below narrow that down to the port the chip answers. No
     /// production code reads it.
-    pub fffd_read_would_differ: u32,
+    pub any_port_read: bool,
+    /// Whether this tune ever read the AY's register-read port — `$FFFD`
+    /// and the addresses that decode with it
+    /// (`emu198x-gi-ay-3-8910`'s doc: "Data read: IN from port $FFFD").
+    /// No production code reads it.
+    pub ay_read: bool,
+    /// How many of this tune's AY reads returned something other than
+    /// `UNATTACHED_BUS`, i.e. how often the chip had a real answer to give.
+    ///
+    /// The pair with `ay_read` is what makes the read path measurable
+    /// rather than merely present: a tune can probe the port constantly and
+    /// still only ever see 0xFF, which looks identical to a host that
+    /// answers nothing. No production code reads it.
+    pub ay_reads_non_ff: u32,
 }
 
 impl AyPlayer {
@@ -313,8 +305,8 @@ impl AyPlayer {
             ay_dc: DcBlocker::new(sample_rate),
             peak_before_clamp: 0.0,
             any_port_read: false,
-            fffd_read: false,
-            fffd_read_would_differ: 0,
+            ay_read: false,
+            ay_reads_non_ff: 0,
         };
         let init = if player.song.init == 0 {
             player.song.blocks.first().map_or(0, |b| b.address)
@@ -488,21 +480,32 @@ impl AyPlayer {
     /// One host cycle, with the chip kept in step and any AY port write
     /// applied the moment it happens — a write applied a frame late is a
     /// note in the wrong place.
+    ///
+    /// An AY *read* is answered here rather than in `SpectrumHost::step`
+    /// for one reason: the chip lives on this struct, so the host has
+    /// nothing to ask. The host puts `UNATTACHED_BUS` on the bus and names
+    /// the port; this overwrites it for the one port the chip answers. The
+    /// order is safe because the Z80 core latches `data_in` on its next
+    /// `tick()`, which is the next call to this function.
     fn step_with_chip(&mut self) {
         self.host.step();
         self.t_states = self.t_states.wrapping_add(1);
         if let Some(port) = self.host.io_read.take() {
             self.any_port_read = true;
-            if port == 0xFFFD {
-                self.fffd_read = true;
-                // Sync the chip's own idea of which register is selected to
-                // what this host's last 0xFFFD write actually asked for —
-                // see `fffd_read_would_differ`'s doc for why this is safe
-                // and why it does not undercount.
+            if port & AY_SELECT_DECODE_MASK == AY_SELECT_DECODE_MATCH {
+                self.ay_read = true;
+                // The chip's selected register follows this host's last
+                // select write. Setting it here as well as on the write
+                // path matters for a tune that selects a register and reads
+                // it back without ever writing data to it — real hardware
+                // answers that, and a chip whose selection only moved on
+                // data writes would not.
                 self.chip.select_register(self.host.ay_register);
-                if self.chip.read_data() != 0xFF {
-                    self.fffd_read_would_differ += 1;
+                let value = self.chip.read_data();
+                if value != UNATTACHED_BUS {
+                    self.ay_reads_non_ff += 1;
                 }
+                self.host.cpu.data_in = value;
             }
         }
         if let Some((register, value)) = self.host.ay_write.take() {

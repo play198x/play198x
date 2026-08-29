@@ -43,9 +43,9 @@
 //!   tunes that do it are listed by name, not just counted: they are the
 //!   group any change to the memory model is aimed at, so they have to be
 //!   comparable tune by tune between runs.
-//! - Reads of any port, and specifically of 0xFFFD, the AY's data-read
-//!   port, which this host always answers with a blanket 0xFF
-//!   (`AyPlayer::any_port_read`, `fffd_read`, `fffd_read_would_differ`).
+//! - Reads of any port, and of the AY's register-read port in particular,
+//!   which the chip answers (`AyPlayer::any_port_read`, `ay_read`,
+//!   `ay_reads_non_ff`).
 //!
 //! `#[ignore]`d: it needs the Time Capsule mounted, which CI does not have,
 //! and it reads media that is never committed to this repository — the
@@ -181,10 +181,25 @@ struct PagingTune {
     values: u8,
     /// Pre-clamp peak, the same figure [`PeakBuckets`] buckets.
     peak: f32,
-    /// Whether this tune also read port 0xFFFD, so the overlap between the
-    /// paging cohort and the read-back cohort is visible per tune rather
-    /// than inferred from two equal counts.
+    /// Whether this tune also read the AY's register-read port, so the
+    /// overlap between the paging cohort and the read-back cohort is
+    /// visible per tune rather than inferred from two equal counts.
     reads_ay: bool,
+}
+
+/// One tune that read the AY's register-read port, kept by name — the
+/// read-side counterpart to [`PagingTune`], and listed for the same reason.
+struct AyReadTune {
+    name: String,
+    song: usize,
+    /// How many of its reads the chip answered with something other than
+    /// the unattached bus; see [`AyPlayer::ay_reads_non_ff`].
+    non_ff: u32,
+    peak: f32,
+    /// Whether this tune also pages memory. The two cohorts are the same
+    /// size and are not the same tunes, which a pair of counts alone would
+    /// read as one group.
+    pages: bool,
 }
 
 #[test]
@@ -415,12 +430,14 @@ fn the_local_archive_plays() {
     // another tune by tune rather than count by count. See [`PagingTune`].
     let mut paging_cohort: Vec<PagingTune> = Vec::new();
 
-    // Port reads — see `AyPlayer::any_port_read`, `fffd_read` and
-    // `fffd_read_would_differ`'s docs.
+    // Port reads — see `AyPlayer::any_port_read`, `ay_read` and
+    // `ay_reads_non_ff`'s docs.
     let mut any_port_read_tunes = 0u32;
     let mut ay_read_tunes = 0u32;
     let mut ay_read_non_ff_tunes = 0u32;
     let mut ay_read_non_ff_events = 0u64;
+    // Named for the same reason the paging cohort is: see [`AyReadTune`].
+    let mut ay_read_cohort: Vec<AyReadTune> = Vec::new();
 
     for corpus_file in &walk.files {
         let bytes = &corpus_file.bytes;
@@ -480,18 +497,25 @@ fn the_local_archive_plays() {
                             song: song_idx,
                             values: player.host.paging_values_seen,
                             peak,
-                            reads_ay: player.fffd_read,
+                            reads_ay: player.ay_read,
                         });
                     }
                     if player.any_port_read {
                         any_port_read_tunes += 1;
                     }
-                    if player.fffd_read {
+                    if player.ay_read {
                         ay_read_tunes += 1;
-                        if player.fffd_read_would_differ > 0 {
+                        if player.ay_reads_non_ff > 0 {
                             ay_read_non_ff_tunes += 1;
-                            ay_read_non_ff_events += u64::from(player.fffd_read_would_differ);
+                            ay_read_non_ff_events += u64::from(player.ay_reads_non_ff);
                         }
+                        ay_read_cohort.push(AyReadTune {
+                            name: corpus_file.name.clone(),
+                            song: song_idx,
+                            non_ff: player.ay_reads_non_ff,
+                            peak,
+                            pages: player.host.paging_written,
+                        });
                     }
                 }
             }
@@ -590,17 +614,42 @@ fn the_local_archive_plays() {
             tune.song,
             tune.values,
             tune.peak,
-            if tune.reads_ay { "  reads 0xFFFD" } else { "" }
+            if tune.reads_ay {
+                "  reads the AY back"
+            } else {
+                ""
+            }
         );
     }
 
     println!();
-    println!("--- port reads (this host answers every one with a blanket 0xFF) ---");
+    println!("--- port reads (the AY answers its own port; everything else reads 0xFF) ---");
     println!("tunes that read any I/O port at all: {any_port_read_tunes}/{all_parsed}");
-    println!("tunes that read port 0xFFFD specifically: {ay_read_tunes}/{all_parsed}");
+    println!("tunes that read the AY's register-read port: {ay_read_tunes}/{all_parsed}");
     println!(
-        "  of those, tunes where read_data() would ever have differed from 0xFF: {ay_read_non_ff_tunes}/{ay_read_tunes}  (total differing read events across those tunes: {ay_read_non_ff_events})"
+        "  of those, tunes the chip gave something other than 0xFF: {ay_read_non_ff_tunes}/{ay_read_tunes}  (total such read events across those tunes: {ay_read_non_ff_events})"
     );
+    ay_read_cohort.sort_by(|a, b| (&a.name, a.song).cmp(&(&b.name, b.song)));
+    let read_cohort_audible = ay_read_cohort
+        .iter()
+        .filter(|tune| tune.peak > AUDIBLE_THRESHOLD)
+        .count();
+    println!(
+        "  cohort: {} tunes, {read_cohort_audible} audible, {} silent",
+        ay_read_cohort.len(),
+        ay_read_cohort.len() - read_cohort_audible
+    );
+    for tune in &ay_read_cohort {
+        println!(
+            "  {:<44} song {:<3} non-0xFF reads {:<6} peak {:.4}{}",
+            tune.name,
+            tune.song,
+            tune.non_ff,
+            tune.peak,
+            if tune.pages { "  pages memory" } else { "" }
+        );
+    }
+
     assert!(
         total_songs > 0,
         "no songs were found across the corpus on the all-songs pass"

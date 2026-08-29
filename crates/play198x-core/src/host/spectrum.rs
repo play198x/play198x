@@ -1,6 +1,15 @@
 use crate::host::memory::Memory;
 use emu198x_zilog_z80::{BusOp, Z80};
 
+/// What an `IN` from a port nothing answers reads back.
+///
+/// The Z80's data bus has no keeper: with no device driving it, the pull-ups
+/// win and every line reads high. This host wires up a sound chip and a
+/// paging latch and nothing else, so every other port a tune probes — a
+/// joystick, a disk interface, the keyboard — reads as absent, which is what
+/// it is.
+pub(crate) const UNATTACHED_BUS: u8 = 0xFF;
+
 /// The address lines the 128K's memory-paging latch decodes: A15 and A1,
 /// both low, i.e. `(port & 0x8002) == 0x0000`
 /// (`reference/by-system/sinclair-zx-spectrum/128k-memory-paging.md`,
@@ -20,6 +29,17 @@ use emu198x_zilog_z80::{BusOp, Z80};
 /// already use.
 const PAGING_DECODE_MASK: u16 = 0x8002;
 const PAGING_DECODE_MATCH: u16 = 0x0000;
+
+/// The address lines the AY's register-select port decodes: A15 and A14
+/// high, A1 low, i.e. `(port & 0xC002) == 0xC000` — `$FFFD` and `$DFFD`
+/// (`syntheses/zx-spectrum/128k-extras.md`, § I/O ports).
+///
+/// Named rather than written twice: a write here selects a register and a
+/// read here reads that register back, and the read is answered by
+/// `AyPlayer`, which owns the chip. Two copies of one decode in two files
+/// is a pair that can drift apart without anything failing to compile.
+pub(crate) const AY_SELECT_DECODE_MASK: u16 = 0xC002;
+pub(crate) const AY_SELECT_DECODE_MATCH: u16 = 0xC000;
 
 /// The host an `.ay` tune runs on: a 128K Spectrum's RAM, a Z80, and the
 /// ports a tune can make a noise with or page memory through. No ROM, no
@@ -80,8 +100,8 @@ pub struct SpectrumHost {
     pub paging_values_seen: u8,
     /// The port most recently read via an `IoRead` bus request, if any
     /// since the last drain. Drained by `AyPlayer::step_with_chip`, which
-    /// is where the AY chip that could actually answer a real AY read
-    /// lives — this host cannot answer one itself, see `step`'s doc.
+    /// owns the AY chip and answers the chip's read port from it — this
+    /// host holds no chip of its own to ask, see `step`'s doc.
     ///
     /// No production code reads this field — it exists as instrumentation
     /// for the read-side counters on [`crate::player::ay::AyPlayer`], which
@@ -125,7 +145,12 @@ impl SpectrumHost {
             Some(BusOp::MemWrite) => self.mem.write(self.cpu.addr, self.cpu.data),
             Some(BusOp::IoWrite) => self.io_write(self.cpu.addr, self.cpu.data),
             Some(BusOp::IoRead) => {
-                self.cpu.data_in = 0xFF;
+                // The answer for every port but the AY's data port, which
+                // `AyPlayer::step_with_chip` overwrites from the chip
+                // before the CPU latches it: the chip belongs to the
+                // player, so this host cannot answer for it here. See
+                // [`UNATTACHED_BUS`] for what this value is.
+                self.cpu.data_in = UNATTACHED_BUS;
                 self.io_read = Some(self.cpu.addr);
             }
             Some(BusOp::IntAck) => self.cpu.data_in = 0xFF,
@@ -151,7 +176,7 @@ impl SpectrumHost {
             self.mem.page(value);
         }
 
-        if port & 0xC002 == 0xC000 {
+        if port & AY_SELECT_DECODE_MASK == AY_SELECT_DECODE_MATCH {
             self.ay_register = value & 0x0F;
         } else if port & 0xC002 == 0x8000 {
             self.ay_write = Some((self.ay_register, value));

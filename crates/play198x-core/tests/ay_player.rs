@@ -581,6 +581,54 @@ fn the_paging_disable_bit_holds_for_the_rest_of_the_song_and_no_longer() {
     );
 }
 
+/// `IN` from the AY's register port returns the selected register, not the
+/// unattached bus. Ocean's 128K loaders and several tracker players read the
+/// chip back, and a host answering 0xFF to that tells them there is no chip.
+///
+///   01 FD FF     LD BC,0xFFFD
+///   3E 08        LD A,8
+///   ED 79        OUT (C),A        ; select R8, channel A volume
+///   01 FD BF     LD BC,0xBFFD
+///   3E 0D        LD A,0x0D
+///   ED 79        OUT (C),A        ; R8 = 0x0D
+///   01 FD FF     LD BC,0xFFFD
+///   ED 78        IN A,(C)         ; read R8 back
+///   32 00 90     LD (0x9000),A
+///   C9           RET
+#[test]
+fn reading_the_ay_port_returns_the_selected_register() {
+    let code = [
+        0x01, 0xFD, 0xFF, 0x3E, 0x08, 0xED, 0x79, 0x01, 0xFD, 0xBF, 0x3E, 0x0D, 0xED, 0x79, 0x01,
+        0xFD, 0xFF, 0xED, 0x78, 0x32, 0x00, 0x90, 0xC9,
+    ];
+    let player = AyPlayer::new(&ay_with_init(&code), 0, 48_000).unwrap();
+
+    assert!(player.ay_read);
+    assert_eq!(
+        player.host.mem.read(0x9000),
+        0x0D,
+        "the AY's register-read port returned something other than R8's value"
+    );
+}
+
+/// Every other port still reads as absent. The chip is the one thing wired
+/// to this host's bus; a joystick, a disk interface or the keyboard is not,
+/// and a machine that answered them would be lying about what it is.
+///
+///   01 1F 00     LD BC,0x001F     ; the Kempston joystick's port
+///   ED 78        IN A,(C)
+///   32 00 90     LD (0x9000),A
+///   C9           RET
+#[test]
+fn reading_a_port_nothing_is_wired_to_returns_the_unattached_bus() {
+    let code = [0x01, 0x1F, 0x00, 0xED, 0x78, 0x32, 0x00, 0x90, 0xC9];
+    let player = AyPlayer::new(&ay_with_init(&code), 0, 48_000).unwrap();
+
+    assert!(player.any_port_read);
+    assert!(!player.ay_read);
+    assert_eq!(player.host.mem.read(0x9000), 0xFF);
+}
+
 /// An `.ay` block that lands in the paged window belongs to the window, not
 /// to bank 0: the format addresses memory and never names a bank, so a tune
 /// finds the file's bytes there whichever bank it selects.
