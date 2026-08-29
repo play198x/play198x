@@ -282,8 +282,8 @@ impl AyPlayer {
     /// frame's cycles so anything it started can finish, with the AY chip
     /// clocked throughout.
     ///
-    /// Returns whether the interrupt routine returned inside
-    /// [`INTERRUPT_BUDGET`]. A tune whose play routine never comes back is
+    /// Returns whether the interrupt routine returned inside its one-frame
+    /// budget. A tune whose play routine never comes back is
     /// still rendered — it has usually already written the chip registers
     /// this frame — but it is a fact about the playback, and a caller that
     /// wants to count it can. `tests/ay_corpus.rs` does.
