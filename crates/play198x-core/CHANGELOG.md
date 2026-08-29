@@ -7,34 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **the `ay` host has the 128K Spectrum's memory.** It had been claiming to be
-  a 128K in its frame length and its AY clock while its RAM was a flat 64 KB
-  with no banking, so a tune that paged memory ran code the host quietly threw
-  away. There are now eight 16 KB RAM banks: bank 5 fixed at `$4000`, bank 2 at
-  `$8000`, and port `$7FFD` choosing which bank shows through `$C000-$FFFF`.
-  The latch is decoded as the hardware decodes it — A15 and A1 low, so `$5FFD`
-  and `$3FFD` reach it too — and bit 5 locks paging for the rest of the song,
-  there being no reset short of starting the next one. `$0000-$3FFF` stays RAM
-  whatever the ROM-select bit asks for: there is no ROM to page in, and that
-  region holds the `RET` stub the `.ay` format's player is required to supply.
-  An `.ay` block names an address and never a bank, so the file's image of
-  `$C000-$FFFF` is what every pageable bank starts with — otherwise a tune that
-  pages would find its own code gone.
-- **`IN` from the AY's register port returns the selected register.** It used
-  to answer `0xFF`, which is the right answer for a port with nothing behind it
-  and the wrong one for the port the sound chip is on: it tells a tune probing
-  for the chip that there is no chip. Every other port still reads as the
-  unattached bus it is.
-
 ### Changed
 
+- **Breaking: the `ay` host is a 128K Spectrum's memory, not a flat 64 KB.**
+  It had been claiming to be a 128K in its frame length and its AY clock while
+  its RAM had no banking at all, so a tune that paged memory ran code the host
+  quietly threw away. `Memory` now holds eight 16 KB RAM banks: bank 5 fixed at
+  `$4000`, bank 2 at `$8000`, and port `$7FFD` choosing which bank shows
+  through `$C000-$FFFF`. The latch is decoded as the hardware decodes it — A15
+  and A1 low, so `$5FFD` and `$3FFD` reach it too — and bit 5 locks paging for
+  the rest of the song, there being no reset short of starting the next one.
+  `$0000-$3FFF` stays RAM whatever the ROM-select bit asks for: there is no ROM
+  to page in, and that region holds the `RET` stub the `.ay` format's player is
+  required to supply. An `.ay` block names an address and never a bank, so the
+  file's image of `$C000-$FFFF` is what every pageable bank starts with —
+  otherwise a tune that pages would find its own code gone. `Memory::page`
+  returns whether the latch accepted the write.
+- **Breaking: the AY chip belongs to `SpectrumHost`, as `SpectrumHost::ay`,
+  and answers its own ports.** An `IN` from the AY's register port used to
+  return `0xFF`, which is the right answer for a port with nothing behind it
+  and the wrong one for the port the sound chip is on: it tells a tune probing
+  for the chip that there is no chip. The host now answers from the chip when
+  one is fitted and as the unattached bus when none is, so every caller of the
+  public `step` gets one answer rather than one per caller. `SpectrumHost` has
+  gained `ay: Option<Ay3_8910>` (with `Ay3_8910` re-exported, since the field
+  is public) and lost `ay_write`, which existed only so the player could drain
+  chip writes it no longer has to.
 - **Breaking: `AyPlayer::fffd_read` and `AyPlayer::fffd_read_would_differ` are
   now `ay_read` and `ay_reads_non_ff`.** Both are corpus-sweep instrumentation
   that no production code reads. The old pair counted what a read *would* have
   returned had the chip been asked; the chip is asked now, so the counter
   reports what reads actually got.
+
+### Fixed
+
+- **a returned play routine no longer leaves the CPU running for the rest of
+  the frame.** `AyPlayer::frame` clocks the chip and the beeper through the
+  remainder of a frame after the tune's routine returns, and it used to clock
+  the CPU with them, relying on a `HALT` byte parked at the return address to
+  stop it. Any block that covers that address overwrites the byte — 57 of the
+  archive's 1,536 playable tunes ended a run with something else there — and
+  banking adds a second way to lose it, since the address is inside the window
+  `$7FFD` repoints. Those tunes spent most of every frame executing their own
+  data as code, which does not sound like a crash: Ghosts'n'Goblins' play
+  routine never touches the sound chip at all, and every note it appeared to
+  make was the runaway. The remainder of a frame now advances the chip, the
+  beeper and the clock without the CPU, which is what the machine does while
+  the player waits for its next interrupt. Across the archive this takes tunes
+  overrunning their frame budget from 128 to 86 and overrunning frames from
+  17,599 to 13,065, and makes 8 subtunes audible that rendered silence before.
+- **the sentinel return address is recognised at an instruction boundary.**
+  A bare `PC == 0xFFFF` check can match part-way through an instruction whose
+  operand fetches pass through that address, which now matters because the CPU
+  is left where the check stopped it. No tune in the archive trips it.
 
 ## [0.2.0](https://github.com/play198x/play198x/compare/play198x-core-v0.1.3...play198x-core-v0.2.0) - 2026-08-29
 
