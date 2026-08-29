@@ -38,17 +38,35 @@ const AY_TICK_DIVISOR: u32 = 4;
 /// channel a mixed tune clips. Halved, which is a judgement rather than a
 /// measurement — revisit if a real tune sounds wrong.
 ///
-/// This headroom assumption is weaker than it looks once the DC blocker
-/// (`sample_beeper`) is in the signal path: a one-pole DC blocker's
-/// response to an edge is (up to) the *full* step height, not half of it —
-/// a symmetric ±1 square wave's edges come out close to ±2 pre-gain, i.e.
-/// close to full scale even at `BEEPER_GAIN = 0.5` (measured: a beeper-only
-/// square wave settles to a steady-state peak of ~0.9999, not ~0.5 — see
-/// `task-6-report.md`'s fix-round-1 entry). That is correct DC-blocker
-/// behaviour, not a bug, but it means "beeper alone leaves 0.5 of headroom
-/// for the AY chip" no longer holds once a tune is actually toggling the
-/// speaker, which bears on the deferred clipping-clamp question when AY
-/// channels and the beeper are summed.
+/// The DC blocker (`sample_beeper`) makes this gain's effect
+/// frequency-dependent, not a flat halving. For a square wave of amplitude
+/// `A` and half-period `N` output samples, `y[n] = x[n] - x[n-1] +
+/// R*y[n-1]`'s steady-state peak works out to `2A/(1+R^N)` (derived from
+/// the filter's recurrence at the two edges, verified against a direct
+/// simulation) — it climbs toward `2A` as `N` grows and decays toward `A`
+/// as `N` shrinks, because a slow edge's decay-to-zero finishes well before
+/// the next edge arrives, while a fast edge's does not. At 48kHz with this
+/// file's `R ≈ 0.9954`, pre-gain: a 2.18kHz tone (`N=11`) peaks at `1.025`;
+/// 1kHz (`N=24`) at `1.055`; 200Hz (`N=120`) at `1.269`. Post-`BEEPER_GAIN`,
+/// that is a `1.03×`-`1.27×` boost over the unfiltered `0.5` across the
+/// roughly 200Hz-4kHz range real beeper music actually occupies — a mild
+/// overshoot, not a headroom cliff.
+///
+/// The ~0.99 peak measured against `a_beeper_only_tune_is_audible`'s
+/// fixture (see `task-6-report.md`'s fix-round-2 entry) is not
+/// representative of that: the fixture's toggle burst is brief and then
+/// holds for most of a 20ms frame, which behaves close to a ~25Hz square
+/// wave (`N≈960`) — the one point on this curve where `R^N` is small enough
+/// for the peak to approach `2A`. No real beeper engine plays a ~25Hz tone;
+/// it is an artifact of that fixture's shape, not of typical playback.
+///
+/// The AY chip's own three channels already sum to `~1.0` at full volume
+/// (`~0.333` each) before the beeper is added at all, so there is no
+/// headroom budget in this mix regardless of the beeper's own gain — a
+/// clipping clamp is a real, open question. It is deliberately deferred to
+/// the whole-branch review, once the Task 8 corpus shows how many real
+/// tunes actually drive both the chip and the beeper together, and at what
+/// beeper frequencies, so the worst case is measured rather than guessed.
 const BEEPER_GAIN: f32 = 0.5;
 
 /// Target -3dB cutoff for the beeper's DC-blocking high-pass (see
