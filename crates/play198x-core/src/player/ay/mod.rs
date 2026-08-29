@@ -21,7 +21,19 @@ const T_STATES_PER_FRAME: u32 = 70_908;
 /// Where the stub parks a return address so a call's end is detectable.
 const SENTINEL: u16 = 0xFFFF;
 /// A call that has not returned by here is not going to.
-const CALL_BUDGET: u32 = T_STATES_PER_FRAME * 8;
+///
+/// `call()`'s loop counts iterations of `step_with_chip`, and
+/// `step_with_chip` is one half T-state (see `t_states`'s field doc) —
+/// the same half-T-state unit `frame()` compares against
+/// `T_STATES_PER_FRAME * 2`, not `T_STATES_PER_FRAME` alone. Written as
+/// `T_STATES_PER_FRAME * 2 * 4` rather than the equal-valued
+/// `T_STATES_PER_FRAME * 8` so the `* 2` for the unit and the `* 4` for
+/// the budget's actual size — four real 50Hz frames' worth of T-states —
+/// don't collapse into one number that reads like eight frames. An
+/// earlier version of this constant made exactly that misreading, in its
+/// own comment: this is the same half-T-state trap Task 5 hit in
+/// `frame()`'s own loop condition.
+const CALL_BUDGET: u32 = T_STATES_PER_FRAME * 2 * 4;
 /// The 128K AY's clock: its 3,546,900Hz CPU clock halved.
 const AY_CLOCK_HZ: u32 = 1_773_400;
 /// AY ticks per `step_with_chip` call, expressed as a divisor rather than a

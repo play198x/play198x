@@ -14,9 +14,15 @@ pub struct SpectrumHost {
     /// Set on any write to an AY data register (port 0xBFFD). Mirrors
     /// `speaker_written` for the same reason: `ay_write` above is drained
     /// every host cycle by the player that owns the chip, so nothing
-    /// survives in it to inspect once playback has run — this is what a
-    /// caller checks afterwards to tell a tune that drives the chip from one
-    /// that only ever selects a register, or never touches the AY at all.
+    /// survives in it to inspect once playback has run.
+    ///
+    /// No production code reads this field — it exists as instrumentation
+    /// for `tests/ay_corpus.rs`'s sweep, which needs to tell a tune that
+    /// drives the chip apart from one that only ever selects a register, or
+    /// never touches the AY at all, to measure how many real tunes drive
+    /// the beeper and the chip together (the case the mix has no headroom
+    /// budget for; see that test's module doc). One branch in code that
+    /// must run regardless, so the cost of carrying it is one bool.
     pub ay_written: bool,
     /// Bit 4 of the last write to port 0xFE: the speaker. This is the whole
     /// of the beeper.

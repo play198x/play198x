@@ -5,6 +5,7 @@ mod common;
 use common::build_ay;
 use play198x_core::host::spectrum::SpectrumHost;
 use play198x_core::player::ay::AyPlayer;
+use play198x_core::player::ay::format::AyError;
 
 /// The host must execute code we hand it. This program writes 0x42 to
 /// 0x9000 and halts:
@@ -243,4 +244,22 @@ fn a_speaker_write_once_tune_settles_to_silence() {
         settled_peak < 0.01,
         "a one-time speaker write left a constant DC offset instead of decaying to silence (peak {settled_peak})"
     );
+}
+
+/// An init routine that never returns must be reported, not silently
+/// discarded into a player that renders nothing — the corpus sweep in
+/// `tests/ay_corpus.rs` found 143 of 696 real archive files land here,
+/// and until now nothing exercised the branch that decides that.
+///   init at 0x8000: 18 FE  JR $  (an unconditional jump to itself: the
+///                                 CPU spins here forever and never RETs)
+#[test]
+fn an_init_that_never_returns_is_reported_not_silently_played() {
+    let code = vec![0x18, 0xFE];
+    let bytes = build_ay(0x8000, 0x8000, 0x8000, &code);
+    // `AyPlayer` isn't `Debug` (it holds a `Z80` core), so `unwrap_err()`
+    // doesn't compile here — matched explicitly instead.
+    match AyPlayer::new(&bytes, 0, 48_000) {
+        Ok(_) => panic!("a spinning init routine should be reported, not swallowed"),
+        Err(err) => assert_eq!(err, AyError::InitDidNotReturn),
+    }
 }

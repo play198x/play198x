@@ -1,5 +1,4 @@
 #![cfg(feature = "ay")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Runs the local World of Spectrum AY archive.
 //!
 //! Every other `ay` test proves the host runs against tunes this crate
@@ -11,6 +10,15 @@
 //! roughly full scale before the beeper is added, and there is no clipping
 //! clamp yet — a decision deferred to the whole-branch review until this
 //! sweep supplied the real numbers to decide it with).
+//!
+//! **Only song 0 of each file is ever played** (`AyPlayer::new(&bytes, 0,
+//! ...)`). The archive holds 1,915 songs across these 696 files and 278 of
+//! them carry more than one song, so every percentage this sweep prints
+//! describes *first songs only* — 1,219 songs, 63.7% of the archive's total
+//! tune count, are never exercised by this test at all. Playing every song
+//! would multiply the sweep's runtime by roughly the same factor for a
+//! question (does the host run) this slice's other tests already answer
+//! per-song; deferred rather than done here.
 //!
 //! `#[ignore]`d: it needs the Time Capsule mounted, which CI does not have,
 //! and it reads media that is never committed to this repository — the
@@ -47,10 +55,11 @@ const AUDIBLE_THRESHOLD: f32 = 0.01;
 /// [`AyError`] variant rather than collapsed into one count.
 ///
 /// A flat `failed` number cannot tell "this crate's parser is broken" from
-/// "this tune installs its own interrupt handler and waits for a real Z80
-/// `INT`, which slice 1 does not simulate by design" — both would show up
-/// as `InitDidNotReturn` here, but only the breakdown lets a human tell
-/// which is which. See `AyError`'s own doc for what each variant means.
+/// "this tune's init routine never returns", and even the breakdown by
+/// variant only gets you as far as [`AyError::InitDidNotReturn`] — telling
+/// *why* an init routine didn't return needs more than a counter can carry,
+/// see the comment beside this sweep's audible-share assertion for what was
+/// actually established about that.
 #[derive(Default, Debug)]
 struct Failures {
     not_an_ay_file: u32,
@@ -150,7 +159,9 @@ fn the_local_archive_plays() {
     let samples_per_frame = (SAMPLE_RATE / 50) as usize;
     let mut out = vec![0.0f32; samples_per_frame * 2];
 
-    for bytes in ay_files(&root) {
+    let walk = ay_files(&root);
+
+    for bytes in walk.files {
         match AyPlayer::new(&bytes, 0, SAMPLE_RATE) {
             Err(err) => failures.record(&err),
             Ok(mut player) => {
@@ -177,7 +188,11 @@ fn the_local_archive_plays() {
     let audible = parsed - peaks.silent;
 
     println!("--- ay corpus sweep: {ARCHIVE} ---");
-    println!("parsed {parsed}  failed {}", failures.total());
+    println!(
+        "parsed {parsed}  failed {}  damaged archives (dropped from the walk) {}",
+        failures.total(),
+        walk.damaged_archives
+    );
     println!("failure breakdown: {failures:?}");
     println!("audible {audible}  silent {}", peaks.silent);
     println!("peak distribution: {peaks:?}");
@@ -191,32 +206,85 @@ fn the_local_archive_plays() {
 
     assert!(parsed > 0, "no .ay files were found under {ARCHIVE}");
 
-    // Measured against the real archive on 2026-08-29 (696 files total; see
-    // task-8-report.md for the full breakdown this run produced):
-    //   parsed 551  failed 145 (143 InitDidNotReturn, 2 BadPointer)
-    //   audible 513  silent 38  -> 513/551 = 93.1%
-    // The 143 `InitDidNotReturn` failures are expected, not a host bug: they
-    // are tunes whose interrupt routine waits on a real Z80 `INT` this
-    // slice's stub player never raises (see the plan's scope note on the
-    // stub) — out of slice 1 by design. The 2 `BadPointer` are worth a
-    // one-off look but are too few to move this bar.
+    // `audible / parsed` cannot catch a parser regression on its own: break
+    // parsing on 90% of the archive and the survivors could still clear an
+    // 85% audible share, so this test would keep passing while reporting a
+    // parser that had mostly stopped working. This checks the denominator
+    // directly. Measured baseline: 553/696 parsed. The floor sits at 500,
+    // real margin under that — room for a handful more legitimately
+    // InitDidNotReturn files to turn up without tripping this — while still
+    // catching the shape of regression the audible-share assertion below
+    // cannot.
+    assert!(
+        parsed >= 500,
+        "parsed count dropped well below the measured baseline of 553/696: {parsed}"
+    );
+
+    // Measured against the real archive on 2026-08-29 (696 files total,
+    // after `follow`'s signed/unsigned-fallback fix — see its own doc):
+    //   parsed 553  failed 143 (all InitDidNotReturn; BadPointer is 0)
+    //   audible 515  silent 38  -> 515/553 = 93.1%
+    //
+    // `AyError::InitDidNotReturn` can only be produced by `new()`'s own
+    // `call(init)` — `frame()` discards its `call(interrupt)` result with
+    // `let _` and cannot raise it. So all 143 failures here are the tune's
+    // *init* routine, not its interrupt routine, failing to return inside
+    // `CALL_BUDGET`, and what is actually known about why is limited to
+    // three figures, not one flat "expected":
+    //   - 6 of 143 are the budget itself: a follow-up run at 10x and 100x
+    //     `CALL_BUDGET` recovered 3 and 6 of them respectively (143 at 1x,
+    //     140 at 10x, 137 at 100x; restored to 1x, 143 again with a clean
+    //     tree) — real work that simply needed more cycles than a stub init
+    //     is normally given, not tunes waiting on anything.
+    //   - 18 of 143 are provably waiting on a real Z80 `INT` this slice's
+    //     stub player never raises: `call()` exhausted its budget with the
+    //     CPU's `halt` flag set, which only a `HALT` instruction sets and
+    //     only an accepted interrupt clears — out of slice 1 by design, see
+    //     the plan's scope note on the stub player.
+    //   - 125 of 143 exhaust the budget spinning at a fixed PC. Consistent
+    //     with the same INT-wait (a busy-loop polling a flag an interrupt
+    //     handler would set) but *not proof* of it — an unrelated infinite
+    //     loop would look identical from the outside, and this sweep cannot
+    //     currently tell the two apart.
+    // A LoReg/HiReg field-order swap was tested as an alternative
+    // explanation for the spinning majority and excluded: swapping did not
+    // change which files failed.
     //
     // The bar below sits at 85%, comfortably under the measured 93.1%, so a
     // real regression in host correctness has room to show up before the
-    // bar does, without the bar itself being so tight that ordinary
-    // archive noise (a handful more real INT-waiting tunes, say) trips it.
+    // bar does, without the bar itself being so tight that ordinary archive
+    // noise (a handful more real INT-waiting or budget-limited tunes, say)
+    // trips it.
     assert!(
         audible * 100 >= parsed * 85,
         "fewer than 85% of the parsed archive made a sound: {audible}/{parsed}"
     );
 }
 
+/// What one walk of the archive produced: every `.ay` file's bytes, plus how
+/// many archives along the way could not be opened or listed at all.
+struct Walk {
+    files: Vec<Vec<u8>>,
+    /// A `.zip` that `Container::open` or `.entries()` refused. Counted
+    /// rather than silently skipped: a walker that drops damaged input from
+    /// its own denominator with no record of having done so is exactly the
+    /// kind of silent loss this sweep exists to catch elsewhere in the
+    /// archive, and would otherwise inflate every percentage above by
+    /// shrinking `parsed`'s denominator without saying so. Zero on every
+    /// run so far (this archive's 696 `.zip` files each open cleanly), but
+    /// the count is printed either way rather than assumed.
+    damaged_archives: u32,
+}
+
 /// Every `.ay` file under `root`, read directly from disk, plus every `.ay`
 /// entry inside an `.ay.zip` sibling, read through this crate's own
 /// container reader rather than a second unzipper — the same path a real
 /// caller opening one of these archives would take.
-fn ay_files(root: &Path) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
+fn ay_files(root: &Path) -> Walk {
+    let mut walk = Walk {
+        files: Vec::new(),
+        damaged_archives: 0,
+    };
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -231,13 +299,15 @@ fn ay_files(root: &Path) -> Vec<Vec<u8>> {
             let lower = path.to_string_lossy().to_ascii_lowercase();
             if lower.ends_with(".ay") {
                 if let Ok(bytes) = std::fs::read(&path) {
-                    out.push(bytes);
+                    walk.files.push(bytes);
                 }
             } else if lower.ends_with(".zip") {
                 let Ok(container) = Container::open(&path) else {
+                    walk.damaged_archives += 1;
                     continue;
                 };
                 let Ok(zip_entries) = container.entries() else {
+                    walk.damaged_archives += 1;
                     continue;
                 };
                 for zip_entry in zip_entries {
@@ -249,11 +319,11 @@ fn ay_files(root: &Path) -> Vec<Vec<u8>> {
                     if zip_entry.path.to_ascii_lowercase().ends_with(".ay")
                         && let Ok(inner) = container.read(&zip_entry.path)
                     {
-                        out.push(inner);
+                        walk.files.push(inner);
                     }
                 }
             }
         }
     }
-    out
+    walk
 }

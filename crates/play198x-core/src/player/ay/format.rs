@@ -4,7 +4,8 @@
 //! relative to its own position in the file** — the target is the pointer's
 //! own offset plus its value. Verified against real files from the World of
 //! Spectrum archive rather than from memory; an early draft of this parser
-//! had `LoReg` and `HiReg` the other way round.
+//! had `LoReg` and `HiReg` the other way round. `follow` also documents a
+//! narrow, evidence-backed exception to "signed": see its own doc.
 
 /// Why a file could not be read. Every variant is reachable from bytes a
 /// stranger supplied.
@@ -52,14 +53,77 @@ fn be16(bytes: &[u8], at: usize) -> Result<u16, AyError> {
     Ok(u16::from_be_bytes([pair[0], pair[1]]))
 }
 
-/// Resolves a signed relative pointer stored at `at`.
+/// Resolves a relative pointer stored at `at`: the signed reading the
+/// format specifies, falling back to an unsigned reading of the same bits
+/// only when the signed one fails.
+///
+/// # Why signed first
+///
+/// The AY format's own documentation (vgmrips' "AY File Format" page,
+/// itself transcribing Sergey Bulba's original spec with Patrik Rak's
+/// help) is explicit about the encoding: "all pointers are signed and
+/// relative", and each pointer field is declared `smallint` — Pascal for
+/// a signed 16-bit integer. That is what this function reads first, and
+/// it is the only reading most files ever need.
+///
+/// # Why a fallback exists, and why it is safe
+///
+/// Two files out of the 696 in the corpus Task 8 swept
+/// (`games/r/RobinOfTheWood.ay.zip`, `demos/s/SpecialMusicCollection.ay.zip`)
+/// store a block offset whose *signed* reading resolves outside the file —
+/// `RobinOfTheWood.ay`'s song 15, block 0 stores `0xC5BD` (50,621) at file
+/// position 838, which signed is -14,077 relative to its own position,
+/// negative and so out of range. The format's documentation says pointers
+/// are signed; it does not say what a reader should do when that reading
+/// fails, so this is not a question the spec answers either way.
+///
+/// What settles it is the corpus: read as an *unsigned* distance instead,
+/// `RobinOfTheWood.ay`'s same bits resolve to file position 51,459, and
+/// that position plus the block's own 2,126-byte length lands at exactly
+/// 53,585 — this file's length to the byte. `SpecialMusicCollection.ay` is
+/// stronger evidence again: its failing pointer (song 7, block 1, field
+/// `0x9461` at position 506) reads unsigned as position 38,491, ending
+/// (with its 3,775-byte length) at 42,266 — which is exactly where song
+/// 8's block 1 begins under the *same* unsigned reading, and that block's
+/// unsigned end lands at 46,216, this file's length, again to the byte.
+/// Two independently-computed pointers, in two different songs, landing
+/// contiguous with each other and flush with end-of-file is not a
+/// coincidence a corrupt file produces by chance.
+///
+/// A pointer whose signed target already resolves inside the file is
+/// never affected by this: the fallback below only runs after the signed
+/// reading has already failed, so every pointer that works today —
+/// including this format's real backward pointers, which the signed
+/// reading exists to serve — takes exactly the path it always has and
+/// lands in exactly the same place. The only pointers the fallback can
+/// change are ones this function would otherwise refuse outright.
+///
+/// This is a heuristic, not a spec rule, and it has a real cost: a
+/// genuinely corrupt file could, by chance, carry a signed-invalid
+/// pointer whose unsigned reading happens to land inside the file too,
+/// and this function would return that address instead of refusing the
+/// file — trading a clean [`AyError::BadPointer`] for a block built from
+/// the wrong bytes. Accepted because the failure mode stays contained
+/// (the returned index is always in-bounds; nothing is read out of the
+/// file, and a tune built from the wrong bytes is exactly the shape of
+/// thing this crate's own tests and the corpus sweep's peak/audible
+/// metrics are built to notice, not a silent or unsafe outcome) and
+/// because the corpus gave two real files, not zero, as evidence this
+/// case is a genuine forward offset outside the signed range rather than
+/// corruption. See `task-8-report.md` (fix round 1) for the corpus-wide
+/// check confirming every file that parsed before this change still
+/// parses to the same songs afterwards.
 fn follow(bytes: &[u8], at: usize) -> Result<usize, AyError> {
-    let delta = be16(bytes, at)? as i16;
-    let target = at as i64 + delta as i64;
-    if target < 0 || target as usize >= bytes.len() {
-        return Err(AyError::BadPointer);
+    let raw = be16(bytes, at)?;
+    let signed_target = at as i64 + (raw as i16) as i64;
+    if signed_target >= 0 && (signed_target as usize) < bytes.len() {
+        return Ok(signed_target as usize);
     }
-    Ok(target as usize)
+    let unsigned_target = at as u64 + raw as u64;
+    if unsigned_target < bytes.len() as u64 {
+        return Ok(unsigned_target as usize);
+    }
+    Err(AyError::BadPointer)
 }
 
 /// A NUL-terminated Latin-1 string. Amiga and Spectrum text is Latin-1, not
