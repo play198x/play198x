@@ -74,6 +74,7 @@ struct Failures {
     bad_pointer: u32,
     no_such_song: u32,
     init_did_not_return: u32,
+    too_large: u32,
 }
 
 impl Failures {
@@ -84,6 +85,7 @@ impl Failures {
             AyError::BadPointer => self.bad_pointer += 1,
             AyError::NoSuchSong => self.no_such_song += 1,
             AyError::InitDidNotReturn => self.init_did_not_return += 1,
+            AyError::TooLarge => self.too_large += 1,
         }
     }
 
@@ -93,6 +95,7 @@ impl Failures {
             + self.bad_pointer
             + self.no_such_song
             + self.init_did_not_return
+            + self.too_large
     }
 }
 

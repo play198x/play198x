@@ -27,7 +27,44 @@ pub enum AyError {
     NoSuchSong,
     /// The tune's init routine never returned inside its cycle budget.
     InitDidNotReturn,
+    /// The file asks for more blocks, or more block bytes, than
+    /// [`MAX_BLOCKS`] and [`MAX_BLOCK_BYTES`] allow.
+    TooLarge,
 }
+
+/// The most blocks `parse` will build out of one file.
+///
+/// A block record is six bytes of file — an address, a length and a pointer
+/// — and describes a `Block` that costs a `Vec` header and its own
+/// allocation. Nothing stops the same record's pointer being reused by every
+/// song in the file, so block *records* are bounded by the file's length
+/// while block *structures* are bounded by the file's length times its song
+/// count, which the format allows to reach 256.
+///
+/// Measured across the 696-file World of Spectrum AY archive on 2026-08-29:
+/// the largest file builds 40 blocks in total, and the busiest single song
+/// builds 5. Eight thousand is 204x the real maximum — headroom for a file
+/// nobody here has seen, and still small enough that the structures alone
+/// stay in the hundreds of kilobytes.
+pub const MAX_BLOCKS: usize = 8_192;
+
+/// The most block data `parse` will copy out of one file.
+///
+/// A block's declared length is two bytes, and its bytes are copied from
+/// anywhere in the file, so a small file can name the same large region
+/// hundreds of times over. Without a cap the growth is quadratic in file
+/// length: a measured 10,066-byte file expanded to 3.87 GB in 0.64 seconds
+/// before this bound existed, and `.ay` files arrive from strangers — the
+/// public site is a page you drop one onto.
+///
+/// The natural bound is the machine: a song's blocks are loaded into one
+/// 64 KiB address space, so 64 KiB is all of one song's block data that can
+/// ever be resident at once. Four mebibytes is sixty-four such address
+/// spaces, and 16x the 255,365 bytes the largest file in the 696-file World
+/// of Spectrum AY archive expands to (measured 2026-08-29; the busiest
+/// single song there expands to exactly 32,768 bytes, half of one address
+/// space).
+pub const MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
@@ -156,8 +193,9 @@ fn nt_string(bytes: &[u8], at: usize) -> String {
 ///
 /// # Errors
 ///
-/// When the magic is wrong, the file ends inside a structure, or a pointer
-/// resolves outside it.
+/// When the magic is wrong, the file ends inside a structure, a pointer
+/// resolves outside it, or the file asks for more blocks or block bytes
+/// than [`MAX_BLOCKS`] and [`MAX_BLOCK_BYTES`] allow.
 pub fn parse(bytes: &[u8]) -> Result<AyFile, AyError> {
     if bytes.len() < 20 || &bytes[0..4] != b"ZXAY" || &bytes[4..8] != b"EMUL" {
         return Err(AyError::NotAnAyFile);
@@ -170,6 +208,8 @@ pub fn parse(bytes: &[u8]) -> Result<AyFile, AyError> {
     let songs_at = follow(bytes, 18)?;
 
     let mut songs = Vec::with_capacity(count);
+    let mut blocks_left = MAX_BLOCKS;
+    let mut bytes_left = MAX_BLOCK_BYTES;
     for i in 0..count {
         let entry = songs_at + i * 4;
         let name = nt_string(bytes, follow(bytes, entry)?);
@@ -191,6 +231,15 @@ pub fn parse(bytes: &[u8]) -> Result<AyFile, AyError> {
             // rejected: the tune may never read the tail, and refusing the
             // whole file would lose one that plays.
             let end = start.saturating_add(length).min(bytes.len());
+            // Both budgets run across the whole file rather than per song,
+            // because the amplification does: every song's address list can
+            // point at the same block records, so a per-song cap would let
+            // 256 songs multiply it back up again.
+            if blocks_left == 0 || end - start > bytes_left {
+                return Err(AyError::TooLarge);
+            }
+            blocks_left -= 1;
+            bytes_left -= end - start;
             blocks.push(Block {
                 address,
                 data: bytes[start..end].to_vec(),
