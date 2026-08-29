@@ -37,7 +37,31 @@ const AY_TICK_DIVISOR: u32 = 4;
 /// bit driven directly, and it is loud; at parity with a full-volume AY
 /// channel a mixed tune clips. Halved, which is a judgement rather than a
 /// measurement — revisit if a real tune sounds wrong.
+///
+/// This headroom assumption is weaker than it looks once the DC blocker
+/// (`sample_beeper`) is in the signal path: a one-pole DC blocker's
+/// response to an edge is (up to) the *full* step height, not half of it —
+/// a symmetric ±1 square wave's edges come out close to ±2 pre-gain, i.e.
+/// close to full scale even at `BEEPER_GAIN = 0.5` (measured: a beeper-only
+/// square wave settles to a steady-state peak of ~0.9999, not ~0.5 — see
+/// `task-6-report.md`'s fix-round-1 entry). That is correct DC-blocker
+/// behaviour, not a bug, but it means "beeper alone leaves 0.5 of headroom
+/// for the AY chip" no longer holds once a tune is actually toggling the
+/// speaker, which bears on the deferred clipping-clamp question when AY
+/// channels and the beeper are summed.
 const BEEPER_GAIN: f32 = 0.5;
+
+/// Target -3dB cutoff for the beeper's DC-blocking high-pass (see
+/// `AyPlayer::dc_r` and `sample_beeper`). Real hardware AC-couples the
+/// speaker, so a held level decays to silence instead of sitting as a
+/// constant offset; this is the digital equivalent. Chosen deliberately,
+/// not copied from a canned `R`: a 1-bit beeper engine has no practical use
+/// below roughly 50Hz (the resolution and the audibility both fall apart
+/// down there), so 35Hz sits well clear of anything a tune would use as a
+/// tone, while being high enough that the filter settles within about one
+/// output frame (20ms) rather than leaving a real click's decay tail
+/// hanging into the next frame or two.
+const DC_BLOCKER_CUTOFF_HZ: f32 = 35.0;
 
 pub struct AyPlayer {
     pub host: SpectrumHost,
@@ -65,6 +89,24 @@ pub struct AyPlayer {
     /// same technique `emu198x-gi-ay-3-8910` uses internally for its own
     /// downsampling, so the two signals stay in step.
     beeper_accumulator: u32,
+    /// The DC-blocking high-pass's pole, `R` in
+    /// `y[n] = x[n] - x[n-1] + R*y[n-1]`, derived from the caller's
+    /// `sample_rate` in `new()` so the filter's cutoff (see
+    /// [`DC_BLOCKER_CUTOFF_HZ`]) — and so its decay time — stays the same
+    /// regardless of what rate this player runs at. A fixed literal `R`
+    /// would tie the cutoff to whichever sample rate happened to be used
+    /// when it was chosen; this player takes an arbitrary caller-supplied
+    /// rate (44.1kHz and 48kHz are both realistic), and the two would
+    /// otherwise sound subtly different — deriving `R` keeps them
+    /// identical.
+    dc_r: f32,
+    /// `x[n-1]`: the DC blocker's previous unfiltered beeper sample.
+    dc_prev_x: f32,
+    /// `y[n-1]`: the DC blocker's previous filtered output. Carried on the
+    /// player (not reset per frame) so the filter is continuous across
+    /// frame boundaries — resetting it every frame would reintroduce a
+    /// step at every frame edge, audible as a click at 50Hz.
+    dc_prev_y: f32,
 }
 
 impl AyPlayer {
@@ -122,6 +164,10 @@ impl AyPlayer {
         host.cpu.regs.iy = reg_pair;
 
         let samples_per_frame = (sample_rate / 50) as usize;
+        // R = 1 - 2*pi*fc/fs for a one-pole high-pass's -3dB point at fc,
+        // fs the sample rate — see `dc_r`'s field doc for why this is
+        // derived per-instance rather than a fixed literal.
+        let dc_r = 1.0 - (2.0 * std::f32::consts::PI * DC_BLOCKER_CUTOFF_HZ) / sample_rate as f32;
         let mut player = Self {
             host,
             song,
@@ -132,6 +178,9 @@ impl AyPlayer {
             t_states: 0,
             beeper: Vec::with_capacity(samples_per_frame),
             beeper_accumulator: 0,
+            dc_r,
+            dc_prev_x: 0.0,
+            dc_prev_y: 0.0,
         };
         let init = if player.song.init == 0 {
             player.song.blocks.first().map_or(0, |b| b.address)
@@ -164,8 +213,21 @@ impl AyPlayer {
         let mut mono = vec![0.0f32; self.samples_per_frame];
         self.chip.end_frame(&mut mono);
 
-        // A tune that never wrote the speaker port has no beeper signal, and
-        // must not be given a DC offset by the -1.0 resting level.
+        // A tune that never wrote the speaker port has no beeper signal.
+        // The DC blocker in `sample_beeper` now removes a *held* level's
+        // offset on its own, so this guard is no longer preventing a sticky
+        // DC offset — but it still earns its place: `sample_beeper` runs
+        // unconditionally from the start of playback (the filter has to see
+        // every sample to stay continuous, see its comment), so a tune that
+        // never writes the port is still feeding the filter a constant
+        // -1.0 it was never told to expect. Against the filter's zeroed
+        // initial state that constant looks exactly like an edge, and the
+        // filter answers with its own start-up transient before decaying
+        // away. Without this guard that transient — not a real event —
+        // would leak into the very first frame of every tune with no
+        // beeper output at all. Gating on `speaker_written` keeps such a
+        // tune silent from sample zero, not just "silent after the filter
+        // settles".
         if self.host.speaker_written {
             for (sample, beep) in mono.iter_mut().zip(self.beeper.iter()) {
                 *sample += BEEPER_GAIN * beep;
@@ -236,13 +298,27 @@ impl AyPlayer {
     /// call and firing whenever the running total reaches that many host
     /// cycles emits exactly `samples_per_frame` samples a frame, every
     /// frame, with no truncation and no drift.
+    ///
+    /// Each downsampled sample is passed through the DC-blocking high-pass
+    /// (`dc_r`, `dc_prev_x`, `dc_prev_y`) before it is buffered, so a level
+    /// the tune holds — rather than toggles — decays instead of sitting as
+    /// a constant offset in every later frame. This runs unconditionally,
+    /// not gated on `host.speaker_written`: the filter's state must be
+    /// continuous from the start of playback, or the first real write would
+    /// hit an untracked filter and produce the wrong transient. `render`'s
+    /// gate is what keeps a tune that never touches the port silent (see
+    /// its comment) — this function only shapes the signal, it does not
+    /// decide whether the signal is heard.
     fn sample_beeper(&mut self) {
         self.beeper_accumulator += self.samples_per_frame as u32;
         if self.beeper_accumulator >= T_STATES_PER_FRAME * 2 {
             self.beeper_accumulator -= T_STATES_PER_FRAME * 2;
             let level = if self.host.speaker { 1.0 } else { -1.0 };
+            let filtered = level - self.dc_prev_x + self.dc_r * self.dc_prev_y;
+            self.dc_prev_x = level;
+            self.dc_prev_y = filtered;
             if self.beeper.len() < self.samples_per_frame {
-                self.beeper.push(level);
+                self.beeper.push(filtered);
             }
         }
     }

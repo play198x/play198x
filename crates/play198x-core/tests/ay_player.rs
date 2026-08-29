@@ -173,3 +173,74 @@ fn a_beeper_only_tune_is_audible() {
     }
     assert!(peak > 0.01, "a beeper tune rendered silence (peak {peak})");
 }
+
+/// A tune that writes the speaker port once, then never touches it again,
+/// must decay to silence — not hold a constant DC offset forever. Before
+/// this fix, `speaker_written` was a sticky "ever written" flag rather than
+/// "written this frame": it kept mixing a fixed +-BEEPER_GAIN offset into
+/// every frame after a single write. That would have corrupted Task 8's
+/// peak-based audibility sweep over 696 real `.ay` files — every tune that
+/// so much as touched the speaker port once would measure as permanently
+/// audible regardless of what it actually played.
+///
+/// The write itself is real signal (a one-off click, exactly as it would be
+/// on real AC-coupled hardware) and must still be audible; only the *held*
+/// level afterwards must die away. This test checks both halves, because a
+/// DC blocker that is too aggressive would kill the click along with the
+/// offset, and one that does nothing would pass neither.
+///   interrupt: on the very first call only (guarded by a flag byte at
+///              0x9000), OUT (0xFE),A once with bit 4 set; every later call
+///              is a no-op RET
+#[test]
+fn a_speaker_write_once_tune_settles_to_silence() {
+    let mut code = vec![0u8; 0x40];
+    code[0x10..0x20].copy_from_slice(&[
+        0x3A, 0x00, 0x90, // LD A,(0x9000)   already written?
+        0xB7, // OR A
+        0x20, 0x09, // JR NZ,+9  -> RET
+        0x3E, 0x01, // LD A,1
+        0x32, 0x00, 0x90, // LD (0x9000),A
+        0x3E, 0x10, // LD A,0x10   (speaker high)
+        0xD3, 0xFE, // OUT (0xFE),A
+        0xC9, // RET
+    ]);
+
+    let bytes = build_ay(0x8000, 0x8010, 0x8000, &code);
+    let mut player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+    let mut out = vec![0.0f32; 48_000 / 50 * 2];
+
+    // Frame 0 contains the one-time write: a real click, must be audible.
+    player.frame();
+    player.render(&mut out);
+    let click_peak = out
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    assert!(
+        click_peak > 0.01,
+        "the one-time speaker write produced no audible click (peak {click_peak})"
+    );
+
+    // Frame 1: let the DC blocker settle further without asserting on it —
+    // one frame in it is still partway down its decay curve, and pinning
+    // the exact sample count the filter takes would make this test as
+    // fragile as the bug it is guarding against.
+    player.frame();
+    player.render(&mut out);
+
+    // By two frames after the click and onward, nothing has touched the
+    // port again: a sticky DC offset would keep every one of these frames
+    // at the same non-zero peak the click left behind, so this is exactly
+    // where the old bug would have shown up.
+    let mut settled_peak = 0.0f32;
+    for _ in 0..8 {
+        player.frame();
+        player.render(&mut out);
+        for sample in &out {
+            settled_peak = settled_peak.max(sample.abs());
+        }
+    }
+    assert!(
+        settled_peak < 0.01,
+        "a one-time speaker write left a constant DC offset instead of decaying to silence (peak {settled_peak})"
+    );
+}
