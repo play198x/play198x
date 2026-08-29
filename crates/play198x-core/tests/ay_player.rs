@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 
-use common::build_ay;
+use common::{FIXTURE_HI_REG, FIXTURE_LO_REG, build_ay, build_ay_songs};
 use play198x_core::host::spectrum::SpectrumHost;
 use play198x_core::player::ay::AyPlayer;
 use play198x_core::player::ay::format::AyError;
@@ -83,22 +83,60 @@ fn ay_with_reg_pair_probe() -> Vec<u8> {
 }
 
 /// The format hands the player one 16-bit value for every "common" register
-/// pair, split as HiReg (high byte) / LoReg (low byte) for all ten of them —
-/// `build_ay` fixes these at 0x22 / 0x11, so HL (and every other pair) must
-/// read 0x2211 by the time init runs.
+/// pair, split as HiReg (the high byte) / LoReg (the low byte) for all ten of
+/// them, so HL — and every other pair — must read
+/// `FIXTURE_HI_REG << 8 | FIXTURE_LO_REG` by the time init runs.
 #[test]
 fn register_pairs_are_set_from_loreg_and_hireg() {
     let player = AyPlayer::new(&ay_with_reg_pair_probe(), 0, 48_000).unwrap();
     assert_eq!(
         player.host.mem.read(0x9002),
-        0x11,
+        FIXTURE_LO_REG,
         "L (LoReg, the low byte) did not reach HL"
     );
     assert_eq!(
         player.host.mem.read(0x9003),
-        0x22,
+        FIXTURE_HI_REG,
         "H (HiReg, the high byte) did not reach HL"
     );
+}
+
+/// The register halves a song's init routine sees are that song's own.
+///
+/// This is what a multi-song `.ay` uses to select a subtune: the format
+/// hands `init` the subtune number in `A`, the high half of `AF`, so `A`
+/// must carry song *N*'s `HiReg` when song *N* is asked for. A player that
+/// reads the two halves the wrong way round puts the index in `F` instead
+/// and hands `init` a constant — every subtune plays song 0's music, and
+/// nothing about the output looks like a failure.
+///
+///   init at 0x8000: 32 02 90  LD (0x9002),A
+///                   22 04 90  LD (0x9004),HL
+///                   C9        RET
+#[test]
+fn each_song_starts_with_its_own_register_state() {
+    let halves = [(0x00u8, 0xF0u8), (0x01, 0xE1), (0x02, 0xD2)];
+    let code = vec![0x32, 0x02, 0x90, 0x22, 0x04, 0x90, 0xC9];
+    let bytes = build_ay_songs(&halves, 0x8000, 0x8000, 0x8000, &code);
+
+    for (index, &(hi_reg, lo_reg)) in halves.iter().enumerate() {
+        let player = AyPlayer::new(&bytes, index, 48_000).unwrap();
+        assert_eq!(
+            player.host.mem.read(0x9002),
+            hi_reg,
+            "song {index}: init must be handed this song's HiReg in A"
+        );
+        assert_eq!(
+            player.host.mem.read(0x9004),
+            lo_reg,
+            "song {index}: L must carry this song's LoReg"
+        );
+        assert_eq!(
+            player.host.mem.read(0x9005),
+            hi_reg,
+            "song {index}: H must carry this song's HiReg"
+        );
+    }
 }
 
 /// A tune that programs channel A and sets the volume must produce sound.

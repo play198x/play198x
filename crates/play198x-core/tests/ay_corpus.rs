@@ -20,6 +20,13 @@
 //! question (does the host run) this slice's other tests already answer
 //! per-song; deferred rather than done here.
 //!
+//! That is a blind spot as well as a saving, and it has a known shape: song
+//! 0's subtune index is 0, so both register halves hold the same byte, and
+//! anything that depends on telling `HiReg` from `LoReg` is invisible from
+//! here whatever this sweep reports. The tests that can see it are in
+//! `tests/ay_format.rs` and `tests/ay_player.rs`, against fixtures whose
+//! two halves differ.
+//!
 //! `#[ignore]`d: it needs the Time Capsule mounted, which CI does not have,
 //! and it reads media that is never committed to this repository — the
 //! archive is read from its mounted path, never copied in.
@@ -246,9 +253,12 @@ fn the_local_archive_plays() {
     //     handler would set) but *not proof* of it — an unrelated infinite
     //     loop would look identical from the outside, and this sweep cannot
     //     currently tell the two apart.
-    // A LoReg/HiReg field-order swap was tested as an alternative
-    // explanation for the spinning majority and excluded: swapping did not
-    // change which files failed.
+    // Swapping the `HiReg`/`LoReg` field order does not move any figure in
+    // this sweep — 143 either way. That is a statement about this sweep, not
+    // about the format: it plays song 0 only, and song 0's index is 0, so
+    // the two halves hold the same byte there and the swap is a no-op.
+    // Field order is settled in `tests/ay_format.rs` against a literal byte
+    // array, which is an instrument that can actually see it.
     //
     // The bar below sits at 85%, comfortably under the measured 93.1%, so a
     // real regression in host correctness has room to show up before the

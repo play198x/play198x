@@ -178,9 +178,14 @@ impl AyPlayer {
         // register pair -- AF/AF', BC/BC', DE/DE', HL/HL', IX, IY -- split
         // into two halves: HiReg is the high byte (A, B, D, H, IXH, IYH),
         // LoReg is the low byte (F, C, E, L, IXL, IYL). F and F' take LoReg
-        // too; the format does not special-case the flags. Verified against
-        // Project AY's own technical documentation and the vgmrips format
-        // wiki, not inferred from field names.
+        // too; the format does not special-case the flags.
+        //
+        // Which byte of the file is which is the parser's business, and it
+        // matters more than the split does: a multi-song file selects its
+        // subtune by the number the format leaves in A, so reading the two
+        // halves the wrong way round makes every subtune play song 0. See
+        // `format::Song`'s field docs for the offsets, and
+        // `tests/ay_format.rs` for what pins them.
         let reg_pair = (u16::from(song.hi_reg) << 8) | u16::from(song.lo_reg);
         host.cpu.regs.af = reg_pair;
         host.cpu.regs.af_alt = reg_pair;

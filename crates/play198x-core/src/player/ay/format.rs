@@ -2,10 +2,18 @@
 //!
 //! Every multi-byte field is big-endian, and every pointer is **signed and
 //! relative to its own position in the file** — the target is the pointer's
-//! own offset plus its value. Verified against real files from the World of
-//! Spectrum archive rather than from memory; an early draft of this parser
-//! had `LoReg` and `HiReg` the other way round. `follow` also documents a
-//! narrow, evidence-backed exception to "signed": see its own doc.
+//! own offset plus its value. `follow` documents a narrow, evidence-backed
+//! exception to "signed": see its own doc.
+//!
+//! Field offsets come from the format's own specification (Sergey Bulba's,
+//! as transcribed by vgmrips), not from a summary of it. The two that are
+//! easiest to get backwards are `HiReg` and `LoReg` inside a song's data
+//! structure: **`HiReg` is at `data + 8` and `LoReg` at `data + 9`**, in
+//! that order. `tests/ay_format.rs`'s
+//! `the_register_halves_are_read_from_the_offsets_the_format_states` pins
+//! them against a literal byte array rather than against this crate's own
+//! test builder, because a builder that shares the parser's reading cannot
+//! disagree with it.
 
 /// Why a file could not be read. Every variant is reachable from bytes a
 /// stranger supplied.
@@ -32,7 +40,15 @@ pub struct Song {
     pub name: String,
     pub length_frames: u16,
     pub fade_frames: u16,
+    /// The byte every "common" register pair's **high** half starts at —
+    /// `A`, `B`, `D`, `H`, `IXH`, `IYH` — read from `data + 8`. A
+    /// multi-song file usually carries the subtune number here, because a
+    /// tune's init routine takes it in `A`.
     pub hi_reg: u8,
+    /// The byte every "common" register pair's **low** half starts at —
+    /// `F`, `C`, `E`, `L`, `IXL`, `IYL` — read from `data + 9`. The format
+    /// does not special-case the flag registers; `F` and `F'` take this
+    /// byte like any other low half.
     pub lo_reg: u8,
     pub stack: u16,
     pub init: u16,
@@ -186,8 +202,8 @@ pub fn parse(bytes: &[u8]) -> Result<AyFile, AyError> {
             name,
             length_frames: be16(bytes, data + 4)?,
             fade_frames: be16(bytes, data + 6)?,
-            lo_reg: *bytes.get(data + 8).ok_or(AyError::Truncated)?,
-            hi_reg: *bytes.get(data + 9).ok_or(AyError::Truncated)?,
+            hi_reg: *bytes.get(data + 8).ok_or(AyError::Truncated)?,
+            lo_reg: *bytes.get(data + 9).ok_or(AyError::Truncated)?,
             stack: be16(bytes, points)?,
             init: be16(bytes, points + 2)?,
             interrupt: be16(bytes, points + 4)?,
