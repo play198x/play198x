@@ -34,11 +34,15 @@
 //! byte array; this sweep stays a coverage and headroom measurement, not a
 //! correctness proof for any one field.
 //!
-//! Both passes also count port traffic this host does not model correctly
-//! yet, without changing how it answers either kind:
-//! - Writes to port 0x7FFD, the 128K memory-paging port this host's flat
-//!   64 KB cannot act on (`SpectrumHost::paging_written`,
-//!   `paging_values_seen`).
+//! Both passes also measure the two pieces of port traffic that separate a
+//! 128K host from a 64 KB one, because both are things a sweep can see and
+//! a unit test cannot: how much of a real archive pages memory, and how
+//! much of it reads the sound chip back.
+//! - Writes that reach the 128K paging latch, which moves the RAM bank at
+//!   0xC000 (`SpectrumHost::paging_written`, `paging_values_seen`). The
+//!   tunes that do it are listed by name, not just counted: they are the
+//!   group any change to the memory model is aimed at, so they have to be
+//!   comparable tune by tune between runs.
 //! - Reads of any port, and specifically of 0xFFFD, the AY's data-read
 //!   port, which this host always answers with a blanket 0xFF
 //!   (`AyPlayer::any_port_read`, `fffd_read`, `fffd_read_would_differ`).
@@ -162,6 +166,27 @@ impl PeakBuckets {
     }
 }
 
+/// One tune that wrote the 128K paging port, kept by name.
+///
+/// The tunes that page memory and the tunes that read the AY back are one
+/// small group, and both are things this host can either model or drop on
+/// the floor. Recording the group per tune — rather than as a count — is
+/// what makes "did modelling it help *these*?" answerable: a group-level
+/// total can hold still while half its members swap places.
+struct PagingTune {
+    name: String,
+    song: usize,
+    /// Bitwise-OR of every value the tune wrote to the port; see
+    /// [`play198x_core::host::spectrum::SpectrumHost::paging_values_seen`].
+    values: u8,
+    /// Pre-clamp peak, the same figure [`PeakBuckets`] buckets.
+    peak: f32,
+    /// Whether this tune also read port 0xFFFD, so the overlap between the
+    /// paging cohort and the read-back cohort is visible per tune rather
+    /// than inferred from two equal counts.
+    reads_ay: bool,
+}
+
 #[test]
 #[ignore = "needs the local archive"]
 fn the_local_archive_plays() {
@@ -200,8 +225,8 @@ fn the_local_archive_plays() {
 
     // Borrowed rather than consumed: the extended, every-song pass below
     // walks the same bytes again.
-    for bytes in &walk.files {
-        match AyPlayer::new(bytes, 0, SAMPLE_RATE) {
+    for file in &walk.files {
+        match AyPlayer::new(&file.bytes, 0, SAMPLE_RATE) {
             Err(err) => failures.record(&err),
             Ok(mut player) => {
                 parsed += 1;
@@ -386,15 +411,19 @@ fn the_local_archive_plays() {
     let mut paging_default_only_tunes = 0u32;
     let mut paging_nondefault_tunes = 0u32;
     let mut paging_nondefault_values: BTreeSet<u8> = BTreeSet::new();
+    // Every tune in the paging cohort, named, so a run can be compared with
+    // another tune by tune rather than count by count. See [`PagingTune`].
+    let mut paging_cohort: Vec<PagingTune> = Vec::new();
 
     // Port reads — see `AyPlayer::any_port_read`, `fffd_read` and
     // `fffd_read_would_differ`'s docs.
     let mut any_port_read_tunes = 0u32;
-    let mut fffd_read_tunes = 0u32;
-    let mut fffd_read_would_differ_tunes = 0u32;
-    let mut fffd_read_would_differ_events = 0u64;
+    let mut ay_read_tunes = 0u32;
+    let mut ay_read_non_ff_tunes = 0u32;
+    let mut ay_read_non_ff_events = 0u64;
 
-    for bytes in &walk.files {
+    for corpus_file in &walk.files {
+        let bytes = &corpus_file.bytes;
         let file = match format::parse(bytes) {
             Ok(file) => file,
             Err(_) => {
@@ -446,16 +475,22 @@ fn the_local_archive_plays() {
                             paging_nondefault_tunes += 1;
                             paging_nondefault_values.insert(player.host.paging_values_seen);
                         }
+                        paging_cohort.push(PagingTune {
+                            name: corpus_file.name.clone(),
+                            song: song_idx,
+                            values: player.host.paging_values_seen,
+                            peak,
+                            reads_ay: player.fffd_read,
+                        });
                     }
                     if player.any_port_read {
                         any_port_read_tunes += 1;
                     }
                     if player.fffd_read {
-                        fffd_read_tunes += 1;
+                        ay_read_tunes += 1;
                         if player.fffd_read_would_differ > 0 {
-                            fffd_read_would_differ_tunes += 1;
-                            fffd_read_would_differ_events +=
-                                u64::from(player.fffd_read_would_differ);
+                            ay_read_non_ff_tunes += 1;
+                            ay_read_non_ff_events += u64::from(player.fffd_read_would_differ);
                         }
                     }
                 }
@@ -535,15 +570,37 @@ fn the_local_archive_plays() {
     println!(
         "  wrote something else at least once: {paging_nondefault_tunes}  (distinct OR'd nonzero values seen, per tune: {paging_nondefault_values:?})"
     );
+    paging_cohort.sort_by(|a, b| (&a.name, a.song).cmp(&(&b.name, b.song)));
+    let cohort_audible = paging_cohort
+        .iter()
+        .filter(|tune| tune.peak > AUDIBLE_THRESHOLD)
+        .count();
+    let cohort_peak = paging_cohort
+        .iter()
+        .fold(0.0f32, |largest, tune| largest.max(tune.peak));
+    println!(
+        "  cohort: {} tunes, {cohort_audible} audible, {} silent, largest peak {cohort_peak:.4}",
+        paging_cohort.len(),
+        paging_cohort.len() - cohort_audible
+    );
+    for tune in &paging_cohort {
+        println!(
+            "  {:<44} song {:<3} 0x7FFD bits 0x{:02X}  peak {:.4}{}",
+            tune.name,
+            tune.song,
+            tune.values,
+            tune.peak,
+            if tune.reads_ay { "  reads 0xFFFD" } else { "" }
+        );
+    }
 
     println!();
     println!("--- port reads (this host answers every one with a blanket 0xFF) ---");
     println!("tunes that read any I/O port at all: {any_port_read_tunes}/{all_parsed}");
-    println!("tunes that read port 0xFFFD specifically: {fffd_read_tunes}/{all_parsed}");
+    println!("tunes that read port 0xFFFD specifically: {ay_read_tunes}/{all_parsed}");
     println!(
-        "  of those, tunes where read_data() would ever have differed from 0xFF: {fffd_read_would_differ_tunes}/{fffd_read_tunes}  (total differing read events across those tunes: {fffd_read_would_differ_events})"
+        "  of those, tunes where read_data() would ever have differed from 0xFF: {ay_read_non_ff_tunes}/{ay_read_tunes}  (total differing read events across those tunes: {ay_read_non_ff_events})"
     );
-
     assert!(
         total_songs > 0,
         "no songs were found across the corpus on the all-songs pass"
@@ -553,7 +610,7 @@ fn the_local_archive_plays() {
 /// What one walk of the archive produced: every `.ay` file's bytes, plus how
 /// many archives along the way could not be opened or listed at all.
 struct Walk {
-    files: Vec<Vec<u8>>,
+    files: Vec<CorpusFile>,
     /// A `.zip` that `Container::open` or `.entries()` refused. Counted
     /// rather than silently skipped: a walker that drops damaged input from
     /// its own denominator with no record of having done so is exactly the
@@ -563,6 +620,18 @@ struct Walk {
     /// run so far (this archive's 696 `.zip` files each open cleanly), but
     /// the count is printed either way rather than assumed.
     damaged_archives: u32,
+}
+
+/// One `.ay` file's bytes, under the name it arrived with.
+///
+/// The name is carried so the paging report below can say *which* tunes
+/// drive the 128K paging port, not only how many. That group is small
+/// enough to name, and naming it is what lets a later run be compared tune
+/// by tune: a count alone could hold steady at 17 while its membership
+/// changed underneath, which is exactly the move a regression would make.
+struct CorpusFile {
+    name: String,
+    bytes: Vec<u8>,
 }
 
 /// Every `.ay` file under `root`, read directly from disk, plus every `.ay`
@@ -588,7 +657,10 @@ fn ay_files(root: &Path) -> Walk {
             let lower = path.to_string_lossy().to_ascii_lowercase();
             if lower.ends_with(".ay") {
                 if let Ok(bytes) = std::fs::read(&path) {
-                    walk.files.push(bytes);
+                    walk.files.push(CorpusFile {
+                        name: file_name(&path),
+                        bytes,
+                    });
                 }
             } else if lower.ends_with(".zip") {
                 let Ok(container) = Container::open(&path) else {
@@ -608,11 +680,26 @@ fn ay_files(root: &Path) -> Walk {
                     if zip_entry.path.to_ascii_lowercase().ends_with(".ay")
                         && let Ok(inner) = container.read(&zip_entry.path)
                     {
-                        walk.files.push(inner);
+                        walk.files.push(CorpusFile {
+                            name: format!("{}!{}", file_name(&path), zip_entry.path),
+                            bytes: inner,
+                        });
                     }
                 }
             }
         }
     }
     walk
+}
+
+/// The last component of `path`, for naming a tune in this sweep's output.
+///
+/// The leading directories are the machine this archive happens to be
+/// mounted on, which is not a fact about the corpus and would make one
+/// run's output diff against another's for no reason.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }

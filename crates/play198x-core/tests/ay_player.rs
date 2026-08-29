@@ -3,6 +3,7 @@
 mod common;
 
 use common::{FIXTURE_HI_REG, FIXTURE_LO_REG, build_ay, build_ay_songs};
+use play198x_core::host::memory::Memory;
 use play198x_core::host::spectrum::SpectrumHost;
 use play198x_core::player::ay::AyPlayer;
 use play198x_core::player::ay::format::AyError;
@@ -403,4 +404,242 @@ fn an_interrupt_that_returns_leaves_the_stack_where_it_found_it() {
         );
         assert_eq!(player.host.cpu.regs.sp, sp_after_init, "frame {frame}");
     }
+}
+
+/// Builds a one-song `.ay` whose init routine is `code` at 0x8000 and whose
+/// interrupt routine is the same address — every test below runs init only.
+fn ay_with_init(code: &[u8]) -> Vec<u8> {
+    build_ay(0x8000, 0x8000, 0x8000, code)
+}
+
+/// 0xC000-0xFFFF is a window onto one of eight RAM banks, and port 0x7FFD
+/// says which. A write to the window must land in the selected bank and stay
+/// there while another is paged over it.
+///
+/// This is what separates a 128K from a 64 KB machine, and a host that
+/// ignored the port would pass every other test in this file: the tune runs,
+/// the chip sounds, and the only symptom is that data written to one bank
+/// turns up in another.
+///
+///   3E AA        LD A,0xAA
+///   32 00 C0     LD (0xC000),A     ; into bank 0, the power-on selection
+///   01 FD 7F     LD BC,0x7FFD
+///   3E 01        LD A,1
+///   ED 79        OUT (C),A         ; bank 1 at 0xC000
+///   3E BB        LD A,0xBB
+///   32 00 C0     LD (0xC000),A     ; into bank 1
+///   3A 00 C0     LD A,(0xC000)
+///   32 00 90     LD (0x9000),A
+///   AF           XOR A
+///   ED 79        OUT (C),A         ; bank 0 back
+///   3A 00 C0     LD A,(0xC000)
+///   32 01 90     LD (0x9001),A
+///   C9           RET
+#[test]
+fn the_paged_window_switches_banks_and_each_bank_keeps_its_own_bytes() {
+    let code = [
+        0x3E, 0xAA, 0x32, 0x00, 0xC0, 0x01, 0xFD, 0x7F, 0x3E, 0x01, 0xED, 0x79, 0x3E, 0xBB, 0x32,
+        0x00, 0xC0, 0x3A, 0x00, 0xC0, 0x32, 0x00, 0x90, 0xAF, 0xED, 0x79, 0x3A, 0x00, 0xC0, 0x32,
+        0x01, 0x90, 0xC9,
+    ];
+    let player = AyPlayer::new(&ay_with_init(&code), 0, 48_000).unwrap();
+
+    assert_eq!(
+        player.host.mem.read(0x9000),
+        0xBB,
+        "bank 1 did not read back the byte written to it"
+    );
+    assert_eq!(
+        player.host.mem.read(0x9001),
+        0xAA,
+        "bank 0's byte was overwritten by a write made while bank 1 was paged in"
+    );
+    assert_eq!(player.host.mem.paged_bank(), 0);
+}
+
+/// Banks 5 and 2 sit at fixed addresses *and* can be paged into the window,
+/// so the same byte is reachable at two addresses at once. A model that gave
+/// the window its own eight arrays would pass the test above and fail this
+/// one.
+///
+///   3E 5A        LD A,0x5A
+///   32 00 40     LD (0x4000),A     ; bank 5, at its fixed address
+///   01 FD 7F     LD BC,0x7FFD
+///   3E 05        LD A,5
+///   ED 79        OUT (C),A         ; bank 5 into the window as well
+///   3A 00 C0     LD A,(0xC000)
+///   32 00 90     LD (0x9000),A
+///   C9           RET
+#[test]
+fn bank_five_is_the_same_memory_at_4000_and_at_c000() {
+    let code = [
+        0x3E, 0x5A, 0x32, 0x00, 0x40, 0x01, 0xFD, 0x7F, 0x3E, 0x05, 0xED, 0x79, 0x3A, 0x00, 0xC0,
+        0x32, 0x00, 0x90, 0xC9,
+    ];
+    let player = AyPlayer::new(&ay_with_init(&code), 0, 48_000).unwrap();
+
+    assert_eq!(
+        player.host.mem.read(0x9000),
+        0x5A,
+        "bank 5 paged into the window did not show what was written at 0x4000"
+    );
+}
+
+/// The paging latch decodes A15 and A1 only, so 0x5FFD reaches it exactly as
+/// 0x7FFD does. A host matching the documented port number alone would run
+/// this tune against an address space that never moved.
+///
+///   01 FD 5F     LD BC,0x5FFD
+///   3E 03        LD A,3
+///   ED 79        OUT (C),A
+///   C9           RET
+#[test]
+fn the_paging_latch_answers_every_address_it_decodes_not_just_7ffd() {
+    let code = [0x01, 0xFD, 0x5F, 0x3E, 0x03, 0xED, 0x79, 0xC9];
+    let player = AyPlayer::new(&ay_with_init(&code), 0, 48_000).unwrap();
+
+    assert!(player.host.paging_written);
+    assert_eq!(
+        player.host.mem.paged_bank(),
+        3,
+        "a write to 0x5FFD must page memory: the latch does not decode A14-A2"
+    );
+}
+
+/// Bit 4 asks for a different ROM. This host has none, and the RAM at
+/// 0x0000-0x00FF is the `RET` stub the `.ay` format's player is required to
+/// supply — so the bit must change nothing. If it swapped anything in over
+/// that stub, every tune that calls into low memory would start executing
+/// whatever the file happened to leave there.
+///
+///   01 FD 7F     LD BC,0x7FFD
+///   3E 10        LD A,0x10        ; ROM select
+///   ED 79        OUT (C),A
+///   3A 00 00     LD A,(0x0000)
+///   32 00 90     LD (0x9000),A
+///   3A FF 00     LD A,(0x00FF)
+///   32 01 90     LD (0x9001),A
+///   C9           RET
+#[test]
+fn the_rom_select_bit_leaves_the_ret_stub_in_place() {
+    let code = [
+        0x01, 0xFD, 0x7F, 0x3E, 0x10, 0xED, 0x79, 0x3A, 0x00, 0x00, 0x32, 0x00, 0x90, 0x3A, 0xFF,
+        0x00, 0x32, 0x01, 0x90, 0xC9,
+    ];
+    let player = AyPlayer::new(&ay_with_init(&code), 0, 48_000).unwrap();
+
+    assert_eq!(player.host.mem.read(0x9000), 0xC9);
+    assert_eq!(player.host.mem.read(0x9001), 0xC9);
+}
+
+/// Bit 5 locks the latch until the machine is reset, and nothing this player
+/// does counts as a reset — a new song builds a new host, which is the only
+/// power-cycle there is. So a tune that locks stays locked for the whole of
+/// its own run, and the next song starts from a cold machine.
+///
+///   3E 11        LD A,0x11
+///   32 00 C0     LD (0xC000),A    ; bank 0 marker
+///   01 FD 7F     LD BC,0x7FFD
+///   3E 01        LD A,1
+///   ED 79        OUT (C),A        ; bank 1
+///   3E 22        LD A,0x22
+///   32 00 C0     LD (0xC000),A    ; bank 1 marker
+///   3E 21        LD A,0x21        ; bank 1, and lock the latch
+///   ED 79        OUT (C),A
+///   AF           XOR A
+///   ED 79        OUT (C),A        ; asks for bank 0; must be ignored
+///   3A 00 C0     LD A,(0xC000)
+///   32 00 90     LD (0x9000),A
+///   C9           RET
+#[test]
+fn the_paging_disable_bit_holds_for_the_rest_of_the_song_and_no_longer() {
+    let code = [
+        0x3E, 0x11, 0x32, 0x00, 0xC0, 0x01, 0xFD, 0x7F, 0x3E, 0x01, 0xED, 0x79, 0x3E, 0x22, 0x32,
+        0x00, 0xC0, 0x3E, 0x21, 0xED, 0x79, 0xAF, 0xED, 0x79, 0x3A, 0x00, 0xC0, 0x32, 0x00, 0x90,
+        0xC9,
+    ];
+    let bytes = ay_with_init(&code);
+    let player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+
+    assert!(player.host.mem.paging_locked());
+    assert_eq!(
+        player.host.mem.paged_bank(),
+        1,
+        "a write after the lock still moved the bank"
+    );
+    assert_eq!(player.host.mem.read(0x9000), 0x22);
+
+    let fresh = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+    assert!(
+        !SpectrumHost::new().mem.paging_locked(),
+        "a new host must start with paging unlocked"
+    );
+    assert_eq!(
+        fresh.host.mem.read(0x9000),
+        0x22,
+        "the second run must reach the same state as the first, from a cold machine"
+    );
+}
+
+/// An `.ay` block that lands in the paged window belongs to the window, not
+/// to bank 0: the format addresses memory and never names a bank, so a tune
+/// finds the file's bytes there whichever bank it selects.
+///
+/// The archive's one paging tune depends on exactly this — its code block
+/// runs from 0xBA91 to 0xD970 and it selects bank 1, so a host that loaded
+/// the window into bank 0 alone would have it page six kilobytes of its own
+/// code out from under itself. This fixture is that shape in miniature: the
+/// routine keeps executing across 0xC000 after switching banks.
+///
+///   at 0xC000:
+///   01 FD 7F     LD BC,0x7FFD
+///   3E 03        LD A,3
+///   ED 79        OUT (C),A        ; bank 3 — the rest of this routine had
+///                                 ; better still be here
+///   3A 10 C0     LD A,(0xC010)
+///   32 00 90     LD (0x9000),A
+///   C9           RET
+///   at 0xC010: 5A
+#[test]
+fn a_block_loaded_into_the_window_is_there_whichever_bank_is_paged_in() {
+    let mut code = vec![0u8; 0x11];
+    code[..14].copy_from_slice(&[
+        0x01, 0xFD, 0x7F, 0x3E, 0x03, 0xED, 0x79, 0x3A, 0x10, 0xC0, 0x32, 0x00, 0x90, 0xC9,
+    ]);
+    code[0x10] = 0x5A;
+    let bytes = build_ay(0xC000, 0xC000, 0xC000, &code);
+    let player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+
+    assert_eq!(player.host.mem.paged_bank(), 3);
+    assert_eq!(
+        player.host.mem.read(0x9000),
+        0x5A,
+        "the tune lost its own code and data by paging a bank in over them"
+    );
+}
+
+/// Banks 2 and 5 keep what the file put at their own fixed addresses. They
+/// are the two banks the file can address directly, so filling them with the
+/// window's image instead would throw that away — and both are reachable
+/// through the window as well, which is where it would show.
+#[test]
+fn mirroring_the_window_leaves_the_two_fixed_banks_alone() {
+    let mut mem = Memory::new();
+    mem.load(0x4000, &[0x55]); // bank 5, at its own address
+    mem.load(0x8000, &[0x66]); // bank 2, at its own address
+    mem.load(0xC000, &[0x77]); // the window
+    mem.mirror_window_into_the_pageable_banks();
+
+    for bank in [0u8, 1, 3, 4, 6, 7] {
+        mem.page(bank);
+        assert_eq!(
+            mem.read(0xC000),
+            0x77,
+            "bank {bank} did not start with the window's loaded image"
+        );
+    }
+    mem.page(5);
+    assert_eq!(mem.read(0xC000), 0x55, "bank 5 lost what was put at 0x4000");
+    mem.page(2);
+    assert_eq!(mem.read(0xC000), 0x66, "bank 2 lost what was put at 0x8000");
 }

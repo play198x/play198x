@@ -255,10 +255,21 @@ impl AyPlayer {
         // Z80 core re-fetches NOPs internally without advancing PC while
         // halted), so `step_with_chip` stays safe to call all the way to
         // the next frame boundary.
+        //
+        // Written before the blocks load and before the banks are
+        // mirrored, so every bank a tune can page into the window carries
+        // it: SENTINEL is inside that window, and a tune that switched
+        // banks would otherwise land on whatever the new bank holds there.
         host.mem.write(SENTINEL, 0x76);
         for block in &song.blocks {
             host.mem.load(block.address, &block.data);
         }
+        // The file has now said everything it has to say about the address
+        // space, and said it without ever naming a RAM bank. See
+        // [`Memory::mirror_window_into_the_pageable_banks`] for why that
+        // means every bank starts with the same window image, and what
+        // breaks in the archive if it does not.
+        host.mem.mirror_window_into_the_pageable_banks();
 
         host.cpu.regs.sp = if song.stack == 0 { 0xC000 } else { song.stack };
 
