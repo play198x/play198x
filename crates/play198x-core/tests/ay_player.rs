@@ -824,22 +824,45 @@ fn the_sentinel_is_a_return_only_at_an_instruction_boundary() {
 }
 
 /// A `sample_rate` of zero is nonsense and must not panic or produce
-/// infinities. `Engine::new` makes the same ruling for the same reason; this
-/// is the `.ay` player's half of it, and it needs a second floor `Engine`
-/// does not, because a frame's sample count is a divisor here.
+/// infinities. `Engine::new` makes the same ruling for the same reason.
+///
+/// The tune has to make a noise for this to test anything. The failure is
+/// not in the arithmetic that sets the rate up — it is in the DC blocker,
+/// whose pole `1 - 2*pi*fc/fs` leaves the stable region entirely at a low
+/// enough `fs`, and a filter with `|R| > 1` only diverges once something
+/// feeds it. So this fixture drives the speaker every frame and runs well
+/// past the frame where an unclamped pole reaches infinity, which is frame
+/// 17 at `fs = 0`.
 #[test]
-fn a_zero_sample_rate_is_survived_rather_than_panicked_on() {
-    let mut player = AyPlayer::new(&ay_with_observable_stub(), 0, 0).unwrap();
+fn a_zero_sample_rate_neither_panics_nor_diverges() {
+    let mut code = vec![0u8; 0x40];
+    code[0x10..0x20].copy_from_slice(&[
+        0x06, 0x1E, // LD B,30
+        0x3E, 0x10, // LD A,0x10   (speaker high)
+        0xD3, 0xFE, // OUT (0xFE),A
+        0x00, 0x00, // NOP NOP
+        0x3E, 0x00, // LD A,0x00   (speaker low)
+        0xD3, 0xFE, // OUT (0xFE),A
+        0x10, 0xF4, // DJNZ back to the first LD A
+        0xC9, 0x00, // RET
+    ]);
+    let bytes = build_ay(0x8000, 0x8010, 0x8000, &code);
+    let mut player = AyPlayer::new(&bytes, 0, 0).unwrap();
+
     let mut out = vec![0.0f32; 64];
-    for _ in 0..3 {
+    for frame in 1..=40 {
         player.frame();
-        let frames = player.render(&mut out);
-        assert!(frames <= 32);
+        player.render(&mut out);
+        assert!(
+            player.peak_before_clamp().is_finite(),
+            "frame {frame}: a zero sample rate diverged to {}",
+            player.peak_before_clamp()
+        );
+        assert!(
+            out.iter().all(|sample| sample.is_finite()),
+            "frame {frame}: a rendered sample was not finite"
+        );
     }
-    assert!(
-        player.peak_before_clamp().is_finite(),
-        "a zero sample rate produced a non-finite peak"
-    );
 }
 
 /// Frame 0 is frame 0, not init's leftovers.

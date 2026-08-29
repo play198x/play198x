@@ -52,10 +52,25 @@ const INIT_BUDGET: u32 = T_STATES_PER_FRAME * 2 * 4;
 /// dropped, silently.
 const INTERRUPT_BUDGET: u32 = T_STATES_PER_FRAME * 2;
 /// How far past its budget `call` will run to finish the instruction in
-/// flight. The longest Z80 instruction is 23 T-states (`EX (SP),IX`, and the
-/// `DD CB` displacement forms), which is 46 of the half T-states this
-/// counts; 64 clears that with room and still bounds the work at well under
-/// a thousandth of a frame.
+/// flight, in half T-states.
+///
+/// A give-up, not a guarantee, and the difference matters: no finite bound
+/// can cover every instruction, because this core absorbs prefix bytes into
+/// the instruction that follows them. Sixteen `DD` bytes and a `NOP` are one
+/// instruction to it and retire after 136 half T-states, and the chain has
+/// no length limit. A bound is still wanted — without one this is a second
+/// budget with no ceiling, on a routine that has already proved it does not
+/// return.
+///
+/// 64 is set from what real tunes reach rather than from the instruction
+/// set. Measured across all 1,536 playable songs: 66 of them use the tail at
+/// all, over 4,666 frames of a possible 384,000, the longest is 36 half
+/// T-states (Technician Ted's song 1), and the bound is hit zero times. A
+/// tune that did hit it would resume mid-instruction exactly as it did
+/// before this existed, which is the old behaviour rather than a new fault.
+///
+/// The cost is that a frame whose routine overran can run up to this many
+/// half T-states long — 0.045% of a frame, on the 4,666 frames that use it.
 const INSTRUCTION_TAIL: u32 = 64;
 
 /// The 128K AY's clock: its 3,546,900Hz CPU clock halved.
@@ -96,9 +111,10 @@ const AY_TICK_DIVISOR: u32 = 4;
 /// that figure describes the fixture's shape, not typical playback.
 ///
 /// Left at 0.5 rather than lowered to buy the mix headroom. The corpus is
-/// what settles that: 7 of 553 files drive the chip and the beeper
-/// together, 10 at ten times the frame budget, so detuning the other 522
-/// ay-only tunes to serve them would be paying the wrong bill. The headroom
+/// what settles that: 6 of the 553 files on the sweep's song-0 pass drive
+/// the chip and the beeper together, and 13 of the 1,536 songs across the
+/// whole archive do, so detuning the other 1,475 ay-only songs to serve
+/// them would be paying the wrong bill. The headroom
 /// itself comes from AC-coupling the chip's output instead — see
 /// [`AyPlayer::render`], where the chip's unipolar sum is the thing actually
 /// eating the budget.
@@ -126,7 +142,9 @@ const DC_BLOCKER_CUTOFF_HZ: f32 = 35.0;
 struct DcBlocker {
     /// The pole, `R`, derived from the caller's `sample_rate` so the cutoff
     /// (see [`DC_BLOCKER_CUTOFF_HZ`]) — and so the decay time — stays the
-    /// same whatever rate this player runs at. A fixed literal would tie the
+    /// same whatever rate this player runs at, and floored at 0 so a
+    /// nonsense rate cannot put it outside the region where this filter
+    /// converges. See [`DcBlocker::new`]. A fixed literal would tie the
     /// cutoff to whichever rate happened to be used when it was chosen, and
     /// this player takes an arbitrary caller-supplied one (44.1kHz and 48kHz
     /// are both realistic), so the two would otherwise sound subtly
@@ -141,10 +159,39 @@ struct DcBlocker {
 }
 
 impl DcBlocker {
-    /// `R = 1 - 2*pi*fc/fs` for a one-pole high-pass's -3dB point at `fc`.
+    /// `R = 1 - 2*pi*fc/fs` for a one-pole high-pass's -3dB point at `fc`,
+    /// held inside the region where that filter is stable.
+    ///
+    /// `y[n] = x[n] - x[n-1] + R*y[n-1]` converges only while `|R| < 1`. `R`
+    /// can never exceed 1 for a positive rate, so the bound that matters is
+    /// the lower one: `R > -1` needs `fs > pi*fc`, about 110Hz at this
+    /// cutoff. Below that the filter does not merely sound wrong, it grows
+    /// without limit — at `fs = 0` a tune driving the speaker reaches an
+    /// infinite peak by its eighteenth frame, and `render`'s clamp cannot
+    /// help because `inf` clamps to 1.0 and takes the whole mix with it.
+    ///
+    /// Clamped at 0 rather than at the -1 stability edge, which is two
+    /// judgements rather than one. `R` goes negative below `2*pi*fc` (about
+    /// 220Hz), where the filter alternates sign each sample instead of
+    /// decaying — technically stable and nothing like the intended
+    /// behaviour. And a floor at the edge of stability is a floor with no
+    /// margin: `R = -0.999` converges so slowly it is indistinguishable
+    /// from divergence over any frame count anyone would render. `R = 0`
+    /// leaves `y[n] = x[n] - x[n-1]`, which still blocks DC and cannot
+    /// diverge, so a nonsense rate degrades to a plain difference rather
+    /// than to infinity.
+    ///
+    /// This is the floor that matters, and it is not the one on
+    /// `AyPlayer::new`'s `sample_rate`: that one stops a division by zero
+    /// and keeps a frame's sample count non-zero, and it leaves `R` at
+    /// -218.9.
     fn new(sample_rate: u32) -> Self {
+        let r = 1.0 - (2.0 * std::f32::consts::PI * DC_BLOCKER_CUTOFF_HZ) / sample_rate as f32;
         Self {
-            r: 1.0 - (2.0 * std::f32::consts::PI * DC_BLOCKER_CUTOFF_HZ) / sample_rate as f32,
+            // `max` and not `clamp`: `R` has no upper bound to enforce, and
+            // this also catches the `NaN` that `0.0 / 0.0` would produce,
+            // because `f32::max` returns the other operand for a NaN.
+            r: r.max(0.0),
             prev_x: 0.0,
             prev_y: 0.0,
         }
@@ -503,11 +550,10 @@ impl AyPlayer {
 
     /// How many beeper samples are buffered and not yet rendered.
     ///
-    /// No production code reads this. It exists so
-    /// `tests/ay_player.rs` can pin that init's output does not reach frame
-    /// 0 — see [`AyPlayer::discard_init_output`] — which is otherwise
-    /// visible only as a slightly wrong first frame in something nobody
-    /// listens to closely.
+    /// No production code reads this. It exists so `tests/ay_player.rs` can
+    /// pin that the init routine's output does not reach frame 0, which is
+    /// otherwise visible only as a slightly wrong first frame in something
+    /// nobody listens to closely.
     #[must_use]
     pub fn buffered_beeper_samples(&self) -> usize {
         self.beeper.len()
