@@ -230,6 +230,86 @@ pub fn left(interleaved: &[f32]) -> impl Iterator<Item = f32> + '_ {
     interleaved.as_chunks::<2>().0.iter().map(|frame| frame[0])
 }
 
+/// Builds a one-song `.ay` file in code — no fixture files, per this
+/// repository's rule.
+///
+/// The layout is the `.ay` table from the plan: `ZXAYEMUL` header, one song
+/// table entry, one data block with its own points and one address block,
+/// terminated by an `Address == 0` entry. Every pointer is signed, big-endian,
+/// and relative to its own position. Most of the fields are fixed — author
+/// `"Steve"`, misc `"notes"`, the song named `"Test Tune"`, `SongLength` 500,
+/// `FadeLength` 50, `LoReg` 0x11, `HiReg` 0x22, `Stack` 0xC000 — because the
+/// `ay` player tests only vary `init`, `interrupt` and the single block.
+pub fn build_ay(init: u16, interrupt: u16, block_address: u16, code: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"ZXAYEMUL");
+    b.push(0); // FileVersion
+    b.push(3); // PlayerVersion
+    b.extend_from_slice(&0i16.to_be_bytes()); // PSpecialPlayer (10)
+    let author_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PAuthor (12)
+    let misc_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PMisc (14)
+    b.push(0); // NumOfSongs - 1 => one song
+    b.push(0); // FirstSong
+    let songs_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PSongsStructure (18)
+
+    // Song table: one entry of two pointers.
+    let songs_at = b.len();
+    let name_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes());
+    let data_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes());
+
+    let author_at = b.len();
+    b.extend_from_slice(b"Steve\0");
+    let misc_at = b.len();
+    b.extend_from_slice(b"notes\0");
+    let name_at = b.len();
+    b.extend_from_slice(b"Test Tune\0");
+
+    let data_at = b.len();
+    b.extend_from_slice(&[0, 1, 2, 3]); // AChan..Noise
+    b.extend_from_slice(&500u16.to_be_bytes()); // SongLength
+    b.extend_from_slice(&50u16.to_be_bytes()); // FadeLength
+    b.push(0x11); // LoReg
+    b.push(0x22); // HiReg
+    let points_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes());
+    let addrs_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes());
+
+    let points_at = b.len();
+    b.extend_from_slice(&0xC000u16.to_be_bytes()); // Stack
+    b.extend_from_slice(&init.to_be_bytes());
+    b.extend_from_slice(&interrupt.to_be_bytes());
+
+    let addrs_at = b.len();
+    let block_ptr_at = b.len() + 4;
+    b.extend_from_slice(&block_address.to_be_bytes()); // Address
+    b.extend_from_slice(&(code.len() as u16).to_be_bytes()); // Length
+    b.extend_from_slice(&0i16.to_be_bytes()); // Offset, patched below
+    b.extend_from_slice(&0u16.to_be_bytes()); // terminator
+
+    let block_at = b.len();
+    b.extend_from_slice(code);
+
+    let patch = |b: &mut Vec<u8>, at: usize, target: usize| {
+        let delta = (target as i32 - at as i32) as i16;
+        b[at..at + 2].copy_from_slice(&delta.to_be_bytes());
+    };
+    patch(&mut b, author_ptr_at, author_at);
+    patch(&mut b, misc_ptr_at, misc_at);
+    patch(&mut b, songs_ptr_at, songs_at);
+    patch(&mut b, name_ptr_at, name_at);
+    patch(&mut b, data_ptr_at, data_at);
+    patch(&mut b, points_ptr_at, points_at);
+    patch(&mut b, addrs_ptr_at, addrs_at);
+    patch(&mut b, block_ptr_at, block_at);
+    b
+}
+
 /// The pitch of every waveform cycle in the left channel: `(frame, hz)`.
 ///
 /// Per waveform cycle, from positive-going zero crossings — never
