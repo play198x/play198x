@@ -92,6 +92,19 @@ pub enum Confidence {
 /// Returns `None` when nothing matches, which includes an empty slice: this
 /// takes arbitrary bytes by definition and never panics on any of them, because
 /// a panic reaching the FFI boundary this crate is built for is undefined
+/// The shortest run of bytes `player::ay::format::parse` accepts as an `.ay`
+/// file: the fixed header, through `PSongsStructure` at offset 18.
+///
+/// Declared here and used by the parser, rather than the other way round,
+/// because [`identify`] is not behind the `ay` feature and the parser is.
+/// The two have to agree: a length only one of them enforces means a file
+/// can identify as [`Confidence::Certain`] and then fail to parse as
+/// [`crate::player::ay::format::AyError::NotAnAyFile`], which is a worse
+/// answer than either alone. Written once for the same reason the `.ay` rule
+/// itself is not gated — see this module's note on naming a format without
+/// acquiring a Z80 to do it.
+pub const AY_MIN_LEN: usize = 20;
+
 /// behaviour rather than a crash.
 #[must_use]
 pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
@@ -115,7 +128,7 @@ pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
     // an AY chip. A default build that could plainly say ".ay" and instead
     // reported nothing would be the exact silent failure this module's
     // confidence system exists to avoid.
-    if bytes.len() >= 8 && &bytes[0..4] == b"ZXAY" && &bytes[4..8] == b"EMUL" {
+    if bytes.len() >= AY_MIN_LEN && &bytes[0..4] == b"ZXAY" && &bytes[4..8] == b"EMUL" {
         return Some((Format::Ay, Confidence::Certain));
     }
 

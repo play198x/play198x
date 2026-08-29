@@ -9,19 +9,26 @@
 
 use format198x_commodore_amiga_ilbm::{Compression, Ilbm};
 use format198x_commodore_amiga_mod::MAGIC_OFFSET;
-use play198x_core::probe::{Confidence, Format, identify};
+use play198x_core::probe::{AY_MIN_LEN, Confidence, Format, identify};
 
-/// The eight bytes `identify` actually reads to award `Format::Ay` its
-/// `Certain`: `ZXAY` at 0, `EMUL` at 4, nothing else. `tests/ay_format.rs`'s
-/// `common::build_ay` (via `synthetic_ay`) also starts with these bytes, but
-/// builds a whole parseable file around them — a song table, pointers, a
-/// code block — none of which this identification rule reads. Restating
-/// only the header here, rather than pulling that helper's full layout in,
-/// is what makes this file's tests prove "the magic alone is enough": a
-/// fact `an_ay_file_probes_as_certain` in the gated file, which parses a
-/// complete fixture, cannot pin on its own.
+/// All `identify` reads to award `Format::Ay` its `Certain`: `ZXAY` at 0 and
+/// `EMUL` at 4, in a file long enough for the parser to accept — nothing
+/// else. `tests/ay_format.rs`'s `common::build_ay` (via `synthetic_ay`) also
+/// starts with these bytes but builds a whole parseable file around them: a
+/// song table, pointers, a code block, none of which this rule reads.
+/// Restating only the header here, rather than pulling that helper's full
+/// layout in, is what makes this file's tests prove "the magic and the
+/// length are enough" — a fact `an_ay_file_probes_as_certain` in the gated
+/// file, which parses a complete fixture, cannot pin on its own.
+///
+/// The padding is not decoration. [`AY_MIN_LEN`] is the parser's own
+/// minimum, shared so that identification and parsing cannot disagree, and
+/// `a_header_too_short_to_parse_is_not_identified` below is the test that
+/// holds them together.
 fn ay_header() -> Vec<u8> {
-    b"ZXAYEMUL".to_vec()
+    let mut bytes = b"ZXAYEMUL".to_vec();
+    bytes.resize(AY_MIN_LEN, 0);
+    bytes
 }
 
 /// A four-channel `M.K.` module: one square-wave sample, one pattern, a C-2 on
@@ -131,7 +138,27 @@ fn an_ay_file_is_identified_by_its_header_alone_with_certainty() {
 /// crate's own parser refuses must not be reported `Certain` here either.
 #[test]
 fn a_zxay_header_with_a_different_type_id_is_not_identified_as_an_ay() {
-    assert_eq!(identify(b"ZXAYAMAD"), None);
+    let mut bytes = b"ZXAYAMAD".to_vec();
+    bytes.resize(AY_MIN_LEN, 0);
+    assert_eq!(identify(&bytes), None);
+}
+
+/// A file cannot identify as certainly an `.ay` and then fail to parse as
+/// one. `identify` and `player::ay::format::parse` share [`AY_MIN_LEN`] so
+/// that they cannot drift apart; this is the case that drifting apart would
+/// produce, and it is not hypothetical — the magic is eight bytes, and a
+/// header is twenty.
+#[test]
+fn a_header_too_short_to_parse_is_not_identified() {
+    for len in 8..AY_MIN_LEN {
+        let mut bytes = b"ZXAYEMUL".to_vec();
+        bytes.resize(len, 0);
+        assert_eq!(identify(&bytes), None, "{len} bytes identified as an .ay");
+    }
+    assert!(
+        identify(&ay_header()).is_some(),
+        "{AY_MIN_LEN} bytes should"
+    );
 }
 
 /// The `.ay` counterpart to the ILBM and module collisions below: this rule
