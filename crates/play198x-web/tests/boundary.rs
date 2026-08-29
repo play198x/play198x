@@ -133,11 +133,26 @@ fn an_unknown_format_name_is_an_error_not_a_guess() {
 // Before `format_name` learned this variant, that case crossed as
 // `{format: "unknown", confidence: "certain"}`: an honest identification
 // turned into a false claim of ignorance at the exact boundary this task's
-// core change exists to keep honest. Eight bytes is every byte `identify`
-// reads to award `.ay` its `Certain`.
+// core change exists to keep honest.
+//
+// The fixture is `AY_MIN_LEN` bytes rather than the eight of the magic:
+// `identify` reads only the magic, but it refuses anything shorter than the
+// header `parse` needs, so that a file cannot identify as `Certain` and then
+// fail to parse. Trimming this to eight bytes is the regression that rule
+// exists to prevent, and this test is where it would show.
+/// A `.ay` header long enough for `identify` to accept: the `ZXAY`/`EMUL`
+/// magic, then zeroes out to the minimum length the core requires. The bytes
+/// after the magic are never read here — this shell cannot play an `.ay` — so
+/// they are zeroes rather than a hand-built song table.
+fn ay_header() -> Vec<u8> {
+    let mut bytes = b"ZXAYEMUL".to_vec();
+    bytes.resize(20, 0);
+    bytes
+}
+
 #[wasm_bindgen_test]
 fn an_ay_file_probes_as_certain_even_though_this_shell_cannot_play_it() {
-    let probed = play198x_web::probe(b"ZXAYEMUL").expect("the ZXAY/EMUL header is enough");
+    let probed = play198x_web::probe(&ay_header()).expect("a full-length ZXAY/EMUL header");
     assert_eq!(probed.format(), "ay");
     assert_eq!(probed.confidence(), "certain");
 }
@@ -149,7 +164,7 @@ fn an_ay_file_probes_as_certain_even_though_this_shell_cannot_play_it() {
 /// format this build knows" pretending the name was never recognised.
 #[wasm_bindgen_test]
 fn an_ay_file_is_a_named_refusal_not_an_unrecognised_format() {
-    let err = play198x_web::decode_image(b"ZXAYEMUL", "ay").unwrap_err();
+    let err = play198x_web::decode_image(&ay_header(), "ay").unwrap_err();
     let message = format!("{err:?}");
     assert!(
         message.contains("not a picture"),
