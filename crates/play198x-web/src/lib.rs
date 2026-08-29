@@ -28,7 +28,7 @@ pub struct Probed {
 
 #[wasm_bindgen]
 impl Probed {
-    /// One of `scr`, `koala`, `art-studio`, `ilbm`, `protracker`.
+    /// One of `scr`, `koala`, `art-studio`, `ilbm`, `protracker`, `ay`.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn format(&self) -> String {
@@ -56,6 +56,15 @@ fn format_name(format: Format) -> &'static str {
         Format::ArtStudio => "art-studio",
         Format::Ilbm => "ilbm",
         Format::ProTracker => "protracker",
+        // `Format::Ay` is not behind the core's `ay` feature (identifying
+        // one needs no Z80), and this crate does not enable `ay` — so
+        // `probe` can return `Format::Ay` in every build of this shell, and
+        // naming it "ay" here is what stops that case from crossing as
+        // "unknown". Reporting certainty about an unidentified format would
+        // be the exact silent failure the core's identify() was changed not
+        // to produce; a wildcard arm here would just move that failure to
+        // the boundary.
+        Format::Ay => "ay",
         // `Format` is #[non_exhaustive]: a new variant must be named here
         // before it can cross, rather than crossing as something wrong.
         _ => "unknown",
@@ -139,6 +148,19 @@ impl DecodedImage {
 }
 
 /// Parse a format name from the boundary back into the core's enum.
+///
+/// `"protracker"` already mapped to `Some(Format::ProTracker)` although this
+/// shell has no picture decoder for a module — `decode_image` still calls
+/// `play198x_core::decode::image`, and that refuses a `ProTracker` with a
+/// named reason ("a ProTracker module is music, not a picture; use
+/// `decode::module`") rather than this function claiming the name is not
+/// even recognised. `"ay"` follows the same precedent rather than falling
+/// to the `None` arm below: an unhandled name is right for a name this
+/// build has genuinely never seen, but `"ay"` is a name `probe` itself can
+/// hand back, so refusing it as unrecognised would be false. Routing it
+/// through means the caller gets the core's own accurate refusal ("an .ay
+/// tune is code for a Z80 to run, not a picture; use `player::ay`") instead
+/// of this shell's generic "not a format this build knows".
 fn format_from_name(name: &str) -> Option<Format> {
     match name {
         "scr" => Some(Format::Scr),
@@ -146,6 +168,7 @@ fn format_from_name(name: &str) -> Option<Format> {
         "art-studio" => Some(Format::ArtStudio),
         "ilbm" => Some(Format::Ilbm),
         "protracker" => Some(Format::ProTracker),
+        "ay" => Some(Format::Ay),
         _ => None,
     }
 }

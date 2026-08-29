@@ -17,7 +17,7 @@
 //! | SCR | length exactly 6,912, and nothing above matched | [`Confidence::Probable`] |
 //!
 //! **What separates the two halves of that table is whether a miss can be
-//! caught.** The three certain formats carry a magic number or a checksum, so
+//! caught.** The four certain formats carry a magic number or a checksum, so
 //! bytes that are not one of them fail to match rather than matching wrongly.
 //! The two probable ones have neither: a load address and a length are the
 //! whole signal, and plenty of files that are not Art Studio bitmaps begin
@@ -29,9 +29,10 @@
 //! identification is weak rather than presenting it as settled.
 //!
 //! The order is the substance, not an implementation detail. SCR is identified
-//! by its length and nothing else, so it must be tried last: an ILBM or a
-//! module that happens to run to 6,912 bytes is neither rare nor contrived, and
-//! testing the weak rule first would hand back a Spectrum screen for both.
+//! by its length and nothing else, so it must be tried last: an ILBM, a
+//! module or an `.ay` file that happens to run to 6,912 bytes is neither rare
+//! nor contrived, and testing the weak rule first would hand back a Spectrum
+//! screen for any of them.
 //!
 //! # Why a confidence and not a bare answer
 //!
@@ -95,8 +96,9 @@ pub enum Confidence {
 #[must_use]
 pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
     // Strongest first. A magic number at a fixed offset identifies one format
-    // and nothing else, so these two can never be wrong about a file that
-    // merely has a coincidental length.
+    // and nothing else, so these three — this pair plus the `.ay` check right
+    // below them — can never be wrong about a file that merely has a
+    // coincidental length.
     if is_module(bytes) {
         return Some((Format::ProTracker, Confidence::Certain));
     }
@@ -107,9 +109,6 @@ pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
 
     // `ZXAY` plus `EMUL`, eight bytes of magic in fixed positions — the same
     // eight bytes `player::ay::format::parse` checks to accept the file.
-    // Placed with the other magic checks, above every length-only rule, for
-    // the same reason ILBM is: a rule that reads real structure must not be
-    // shadowed by one that reads a file size.
     //
     // Not behind the `ay` feature, unlike everything that plays one. Naming
     // this file costs eight byte comparisons; nothing here touches a Z80 or

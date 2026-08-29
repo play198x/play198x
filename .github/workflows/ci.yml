@@ -60,6 +60,13 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Default-features-off is checked above; this is its counterpart. The
+      # `ay` feature's Z80/AY-chip player and Spectrum host (`player`,
+      # `host`) are entirely invisible to the run above — a lint only that
+      # feature could trip would ship unnoticed without this step.
+      - name: Run Clippy (ay feature)
+        run: cargo clippy --workspace --all-targets --features ay -- -D warnings
+
   # Cross-platform test: the crate decodes bytes and renders audio to fixed
   # numbers, and the tests assert those numbers, so they must run on every host
   # rather than Linux alone — a platform drift would otherwise slip through.
@@ -94,6 +101,15 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace
+
+      # Proving the crate still builds and passes *without* `ay` is half of
+      # what an optional feature is for — that is what the step above
+      # already does, and it must keep doing exactly that. This is the other
+      # half: every test behind `#[cfg(feature = "ay")]` (the Spectrum host,
+      # the AY player, `.ay` parsing) is otherwise never compiled, let alone
+      # run, by this workflow.
+      - name: Test workspace (ay feature)
+        run: cargo test --workspace --features ay
 
   # `play198x-web` is excluded from the workspace (see the root Cargo.toml), so
   # none of the jobs above ever build, test, or lint it. Without this job the

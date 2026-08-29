@@ -11,13 +11,18 @@ use format198x_commodore_amiga_ilbm::{Compression, Ilbm};
 use format198x_commodore_amiga_mod::MAGIC_OFFSET;
 use play198x_core::probe::{Confidence, Format, identify};
 
-// `common::build_ay` is the one place this repository writes the `.ay` byte
-// layout down (song table, pointers, code block — see its own doc). This
-// file has no `#[cfg(feature = "ay")]` gate anywhere in it, so pulling that
-// helper in here rather than restating a header inline is what proves
-// `Format::Ay` is identified without the `ay` feature, and without a second,
-// driftable copy of the layout `common::build_ay` already owns.
-mod common;
+/// The eight bytes `identify` actually reads to award `Format::Ay` its
+/// `Certain`: `ZXAY` at 0, `EMUL` at 4, nothing else. `tests/ay_format.rs`'s
+/// `common::build_ay` (via `synthetic_ay`) also starts with these bytes, but
+/// builds a whole parseable file around them — a song table, pointers, a
+/// code block — none of which this identification rule reads. Restating
+/// only the header here, rather than pulling that helper's full layout in,
+/// is what makes this file's tests prove "the magic alone is enough": a
+/// fact `an_ay_file_probes_as_certain` in the gated file, which parses a
+/// complete fixture, cannot pin on its own.
+fn ay_header() -> Vec<u8> {
+    b"ZXAYEMUL".to_vec()
+}
 
 /// A four-channel `M.K.` module: one square-wave sample, one pattern, a C-2 on
 /// channel 0 at row 0. The shape is the MOD crate's own test fixture, so what
@@ -102,23 +107,45 @@ fn an_ilbm_is_identified_by_its_form_type_with_certainty() {
 }
 
 #[test]
-fn an_ay_file_is_identified_by_its_header_with_certainty() {
+fn an_ay_file_is_identified_by_its_header_alone_with_certainty() {
     // `Format::Ay`'s rule is deliberately not behind the `ay` feature (see
     // its doc on `probe::Format`): naming an `.ay` costs eight byte
     // comparisons, not a Z80 or an AY chip. This test file carries no `ay`
     // feature gate at all, so a pass here — in whichever configuration this
-    // crate happens to be built with — is what proves that identification
-    // really is reachable without the feature that plays the tune, not just
-    // reachable in the gated `tests/ay_format.rs`.
+    // crate happens to be built with — is what proves identification really
+    // is reachable without the feature that plays the tune. It also proves
+    // the header is genuinely the *whole* signal: `ay_header()` is eight
+    // bytes and nothing more, not a full parseable file cut down to a
+    // subset that happens to still work.
     assert_eq!(
-        identify(&common::build_ay(
-            0x8000,
-            0x8010,
-            0x8000,
-            &[0xAA, 0xBB, 0xCC, 0xDD]
-        )),
+        identify(&ay_header()),
         Some((Format::Ay, Confidence::Certain))
     );
+}
+
+/// The strengthened check holds: `identify` requires `EMUL` as well as
+/// `ZXAY`, matching `player::ay::format::parse`'s own rejection (see
+/// `tests/ay_format.rs`'s `rejects_bytes_that_are_not_an_ay_file`, which
+/// pins the same byte string at the parser). `ZXAY` + `AMAD` is a real type
+/// ID the wild `.ay` corpus carries, not a hypothetical one, so a file this
+/// crate's own parser refuses must not be reported `Certain` here either.
+#[test]
+fn a_zxay_header_with_a_different_type_id_is_not_identified_as_an_ay() {
+    assert_eq!(identify(b"ZXAYAMAD"), None);
+}
+
+/// The `.ay` counterpart to the ILBM and module collisions below: this rule
+/// sits above SCR's length-only fallback specifically so a file that both
+/// opens `ZXAYEMUL` and happens to run to exactly 6,912 bytes is still
+/// identified as an `.ay`, not demoted to a probable screen dump. Moving the
+/// `.ay` rule below SCR's would still pass every other test in this file —
+/// this is the one that would catch it.
+#[test]
+fn an_ay_header_padded_to_6912_bytes_is_an_ay_and_not_a_screen() {
+    let mut bytes = ay_header();
+    assert!(bytes.len() < format198x_sinclair_zx_spectrum_scr::FILE_LEN);
+    bytes.resize(format198x_sinclair_zx_spectrum_scr::FILE_LEN, 0);
+    assert_eq!(identify(&bytes), Some((Format::Ay, Confidence::Certain)));
 }
 
 #[test]
@@ -242,11 +269,7 @@ fn a_uniform_sweep_reaches_every_rule_once_the_signals_are_real() {
     let cases: [(Vec<u8>, Format, Confidence); 6] = [
         (synthetic_module(), Format::ProTracker, Confidence::Certain),
         (synthetic_ilbm(32, 16), Format::Ilbm, Confidence::Certain),
-        (
-            common::build_ay(0x8000, 0x8010, 0x8000, &[0xAA, 0xBB, 0xCC, 0xDD]),
-            Format::Ay,
-            Confidence::Certain,
-        ),
+        (ay_header(), Format::Ay, Confidence::Certain),
         (synthetic_koala(), Format::Koala, Confidence::Certain),
         (
             synthetic_art_studio(format198x_commodore_c64_art_studio::FILE_LEN),

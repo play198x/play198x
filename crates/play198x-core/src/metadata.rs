@@ -43,10 +43,15 @@ pub enum Metadata {
     /// A tune.
     Module(ModuleMeta),
     /// A code-driven tune: an `.ay` file. This variant, and [`AyMeta`]
-    /// itself, are always present — only `ay_meta`, which needs an `AyFile`
-    /// to build one from, is behind the `ay` feature. A build without `ay`
-    /// can still receive and match on a value of this shape; it just cannot
-    /// produce one itself.
+    /// itself, are always present — only `ay_meta`, the sole constructor for
+    /// `AyMeta` (which is `#[non_exhaustive]`, so nothing outside this
+    /// module can build one by struct literal), is behind the `ay` feature,
+    /// because it needs an `AyFile`. A build without `ay` therefore has no
+    /// way to *produce* a `Metadata::Ay` — the benefit of keeping this
+    /// variant ungated is not that such a build can receive one, but that
+    /// every `match` on `Metadata`, everywhere, is forced to name this arm
+    /// rather than getting to skip it because the feature that would fill
+    /// it in happened to be off.
     Ay(AyMeta),
 }
 
@@ -104,11 +109,11 @@ pub struct ImageMeta {
 /// this?" needs one name to show, and the first song is the one a player
 /// opens by default.
 ///
-/// Reading song 0 is safe for any file [`ay_meta`] actually sees: `.ay`
+/// Reading song 0 is safe for any file `ay_meta` actually sees: `.ay`
 /// stores a *last-song index* (`NumOfSongs`), so a stored `0` means one song,
 /// not none, and `player::ay::format::parse` always returns at least one.
 /// But `AyFile`'s fields are public, so nothing stops a caller building one
-/// by hand with an empty `songs` — [`ay_meta`] reads song 0 defensively
+/// by hand with an empty `songs` — `ay_meta` reads song 0 defensively
 /// rather than indexing it, and this struct says what that empty case
 /// produces rather than leaving it to guesswork.
 #[derive(Debug, Clone, PartialEq, Eq)]
