@@ -352,3 +352,55 @@ fn an_init_that_never_returns_is_reported_not_silently_played() {
         Err(err) => assert_eq!(err, AyError::InitDidNotReturn),
     }
 }
+
+/// An interrupt routine that never returns must not eat the stack.
+///
+/// `call` pushes a two-byte sentinel return address so it can tell when a
+/// routine has come back. A routine that never comes back never pops it, and
+/// `frame()` runs 50 times a second — 100 bytes of stack a second, 30 KB
+/// over five minutes, descending through the tune's own code and data on a
+/// machine whose stack grows downward. The tune corrupts itself while
+/// playing, which reads as a tune that falls apart rather than as a fault
+/// here.
+///
+///   init at 0x8000:      C9     RET
+///   interrupt at 0x8010: 18 FE  JR $ (spins forever)
+#[test]
+fn an_interrupt_that_never_returns_leaves_the_stack_where_it_found_it() {
+    let mut code = vec![0u8; 0x20];
+    code[0x00] = 0xC9;
+    code[0x10..0x12].copy_from_slice(&[0x18, 0xFE]);
+
+    let bytes = build_ay(0x8000, 0x8010, 0x8000, &code);
+    let mut player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+    let sp_after_init = player.host.cpu.regs.sp;
+
+    for frame in 1..=100 {
+        assert!(
+            !player.frame(),
+            "frame {frame}: a spinning interrupt routine must be reported as not returning"
+        );
+        assert_eq!(
+            player.host.cpu.regs.sp,
+            sp_after_init,
+            "frame {frame}: the stack moved by {} bytes",
+            sp_after_init.wrapping_sub(player.host.cpu.regs.sp)
+        );
+    }
+}
+
+/// The counterpart: a routine that does return leaves the stack balanced
+/// too, so the restore above cannot be hiding a routine's own imbalance.
+#[test]
+fn an_interrupt_that_returns_leaves_the_stack_where_it_found_it() {
+    let mut player = AyPlayer::new(&ay_with_observable_stub(), 0, 48_000).unwrap();
+    let sp_after_init = player.host.cpu.regs.sp;
+
+    for frame in 1..=100 {
+        assert!(
+            player.frame(),
+            "frame {frame}: the interrupt routine returned"
+        );
+        assert_eq!(player.host.cpu.regs.sp, sp_after_init, "frame {frame}");
+    }
+}

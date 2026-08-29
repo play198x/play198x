@@ -20,20 +20,31 @@ use format::{AyError, AyFile, Song};
 const T_STATES_PER_FRAME: u32 = 70_908;
 /// Where the stub parks a return address so a call's end is detectable.
 const SENTINEL: u16 = 0xFFFF;
-/// A call that has not returned by here is not going to.
+/// How long `new()` gives a tune's init routine to return.
+///
+/// Init runs once and may do real work — unpacking, building tables — so it
+/// gets four 50Hz frames rather than one. Overrunning it costs nothing but
+/// the file, which is refused as [`AyError::InitDidNotReturn`].
 ///
 /// `call()`'s loop counts iterations of `step_with_chip`, and
-/// `step_with_chip` is one half T-state (see `t_states`'s field doc) —
-/// the same half-T-state unit `frame()` compares against
-/// `T_STATES_PER_FRAME * 2`, not `T_STATES_PER_FRAME` alone. Written as
-/// `T_STATES_PER_FRAME * 2 * 4` rather than the equal-valued
-/// `T_STATES_PER_FRAME * 8` so the `* 2` for the unit and the `* 4` for
-/// the budget's actual size — four real 50Hz frames' worth of T-states —
-/// don't collapse into one number that reads like eight frames. An
-/// earlier version of this constant made exactly that misreading, in its
-/// own comment: this is the same half-T-state trap Task 5 hit in
-/// `frame()`'s own loop condition.
-const CALL_BUDGET: u32 = T_STATES_PER_FRAME * 2 * 4;
+/// `step_with_chip` is one half T-state (see `t_states`'s field doc) — the
+/// same half-T-state unit `frame()` compares against `T_STATES_PER_FRAME *
+/// 2`, not `T_STATES_PER_FRAME` alone. Written as `T_STATES_PER_FRAME * 2 *
+/// 4` rather than the equal-valued `T_STATES_PER_FRAME * 8` so the `* 2` for
+/// the unit and the `* 4` for the budget's size don't collapse into one
+/// number that reads like eight frames.
+const INIT_BUDGET: u32 = T_STATES_PER_FRAME * 2 * 4;
+
+/// How long `frame()` gives a tune's interrupt routine to return: exactly
+/// one frame, in the same half-T-state unit.
+///
+/// A play routine called 50 times a second has one frame to finish in on
+/// real hardware, so that is what it gets here. A larger budget does not
+/// rescue a routine that overruns; it makes `frame()` consume several
+/// frames' worth of CPU for one frame of audio, which plays the tune fast
+/// and hands the chip more samples than `end_frame` has room for — they are
+/// dropped, silently.
+const INTERRUPT_BUDGET: u32 = T_STATES_PER_FRAME * 2;
 /// The 128K AY's clock: its 3,546,900Hz CPU clock halved.
 const AY_CLOCK_HZ: u32 = 1_773_400;
 /// AY ticks per `step_with_chip` call, expressed as a divisor rather than a
@@ -247,7 +258,7 @@ impl AyPlayer {
         } else {
             player.song.init
         };
-        if !player.call(init) {
+        if !player.call(init, INIT_BUDGET) {
             return Err(AyError::InitDidNotReturn);
         }
         Ok(player)
@@ -256,16 +267,23 @@ impl AyPlayer {
     /// One 50Hz frame: the tune's interrupt routine, then the rest of the
     /// frame's cycles so anything it started can finish, with the AY chip
     /// clocked throughout.
-    pub fn frame(&mut self) {
+    ///
+    /// Returns whether the interrupt routine returned inside
+    /// [`INTERRUPT_BUDGET`]. A tune whose play routine never comes back is
+    /// still rendered — it has usually already written the chip registers
+    /// this frame — but it is a fact about the playback, and a caller that
+    /// wants to count it can. `tests/ay_corpus.rs` does.
+    pub fn frame(&mut self) -> bool {
         let before = self.t_states;
-        let _ = self.call(self.song.interrupt);
+        let returned = self.call(self.song.interrupt, INTERRUPT_BUDGET);
         // `t_states` counts half T-states (see the field doc), so a real
         // frame's worth of T_STATES_PER_FRAME T-states is twice that many
         // `step_with_chip` calls.
-        while self.t_states - before < T_STATES_PER_FRAME * 2 {
+        while self.t_states.wrapping_sub(before) < T_STATES_PER_FRAME * 2 {
             self.step_with_chip();
         }
         self.frames_played += 1;
+        returned
     }
 
     /// Fills one frame of interleaved stereo. Call once per `frame()`.
@@ -330,11 +348,14 @@ impl AyPlayer {
         }
     }
 
-    /// Calls `address` and runs until it returns or the budget expires.
+    /// Calls `address` and runs until it returns or `budget` half T-states
+    /// expire.
+    ///
     /// Returns false if the routine never came back inside its budget — the
     /// spec's Failure section requires that be reported rather than played as
-    /// silence, so `new()` turns a false here into `AyError::InitDidNotReturn`.
-    fn call(&mut self, address: u16) -> bool {
+    /// silence, so `new()` turns a false here into `AyError::InitDidNotReturn`
+    /// and `frame()` hands it back to its caller.
+    fn call(&mut self, address: u16, budget: u32) -> bool {
         self.host.cpu.regs.pc = address;
         // A previous frame may have left the CPU halted at SENTINEL (see the
         // HALT parked there in `new()`): the core's `halt` flag makes every
@@ -343,19 +364,29 @@ impl AyPlayer {
         // PC directly instead, so it must clear the flag itself or the
         // routine we are about to "call" would never actually execute.
         self.host.cpu.halt = false;
-        self.host.cpu.regs.sp = self.host.cpu.regs.sp.wrapping_sub(2);
+        let sp_before = self.host.cpu.regs.sp;
+        self.host.cpu.regs.sp = sp_before.wrapping_sub(2);
         let sp = self.host.cpu.regs.sp;
         self.host.mem.write(sp, (SENTINEL & 0xFF) as u8);
         self.host
             .mem
             .write(sp.wrapping_add(1), (SENTINEL >> 8) as u8);
 
-        for _ in 0..CALL_BUDGET {
+        for _ in 0..budget {
             self.step_with_chip();
             if self.host.cpu.regs.pc == SENTINEL {
                 return true;
             }
         }
+
+        // Nothing popped the sentinel this call pushed, so put the stack
+        // back where it was found. Without this, an interrupt routine that
+        // never returns costs two bytes of stack every frame — 100 bytes a
+        // second, 30 KB over five minutes — and the Spectrum's stack grows
+        // downward through the tune's own code and data. That is silent
+        // memory corruption of the program still playing, and it looks like
+        // a tune that gradually falls apart rather than like a bug here.
+        self.host.cpu.regs.sp = sp_before;
         false
     }
 

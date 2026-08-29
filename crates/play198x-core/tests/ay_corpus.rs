@@ -115,9 +115,11 @@ struct PeakBuckets {
     moderate: u32,
     /// (0.6, 1.0]: at or under full scale.
     full: u32,
-    /// (1.0, 1.5]: over full scale, but not by a wide margin.
+    /// (1.0, 1.5]: over full scale, but not by a wide margin. Unreachable
+    /// while `render` clamps its output — kept because a bucket that has to
+    /// stay empty is a cheaper statement of that than a comment is.
     hot: u32,
-    /// > 1.5: badly over full scale.
+    /// > 1.5: badly over full scale. Unreachable, like `hot`.
     clipping: u32,
 }
 
@@ -165,6 +167,11 @@ fn the_local_archive_plays() {
     let mut ay_only = 0u32;
     let mut both = 0u32;
     let mut neither = 0u32;
+    // Tunes whose interrupt routine overran its one-frame budget at least
+    // once. `frame()` returns that fact rather than discarding it, and this
+    // is the only place across the whole archive that can say how common it
+    // is — a stub player raises no `INT`, so a routine waiting on one spins.
+    let mut interrupt_overran = 0u32;
 
     let samples_per_frame = (SAMPLE_RATE / 50) as usize;
     let mut out = vec![0.0f32; samples_per_frame * 2];
@@ -177,14 +184,18 @@ fn the_local_archive_plays() {
             Ok(mut player) => {
                 parsed += 1;
                 let mut peak = 0.0f32;
+                let mut overran = false;
                 for _ in 0..FRAMES {
-                    player.frame();
+                    overran |= !player.frame();
                     player.render(&mut out);
                     for sample in &out {
                         peak = peak.max(sample.abs());
                     }
                 }
                 peaks.record(peak);
+                if overran {
+                    interrupt_overran += 1;
+                }
                 match (player.host.speaker_written, player.host.ay_written) {
                     (true, true) => both += 1,
                     (true, false) => beeper_only += 1,
@@ -207,14 +218,27 @@ fn the_local_archive_plays() {
     println!("audible {audible}  silent {}", peaks.silent);
     println!("peak distribution: {peaks:?}");
     println!(
-        "peaks over 1.0 (no clipping clamp exists yet): {}/{parsed}",
+        "peaks over 1.0 (render clamps, so any of these is a clamp that did not hold): {}/{parsed}",
         peaks.over_one()
     );
     println!(
         "sound source: beeper-only {beeper_only}  ay-only {ay_only}  both {both}  neither {neither}"
     );
+    println!("interrupt routine overran its frame at least once: {interrupt_overran}/{parsed}");
 
     assert!(parsed > 0, "no .ay files were found under {ARCHIVE}");
+
+    // `render` clamps to [-1, 1] and documents that as a backstop rather
+    // than the mechanism — AC-coupling the chip's output is what keeps the
+    // mix inside range. Both halves of that claim are checked here: nothing
+    // in the archive exceeds full scale, on 553 real files rather than on
+    // the argument.
+    assert_eq!(
+        peaks.over_one(),
+        0,
+        "render's clamp did not hold on {} of {parsed} files",
+        peaks.over_one()
+    );
 
     // `audible / parsed` cannot catch a parser regression on its own: break
     // parsing on 90% of the archive and the survivors could still clear an
