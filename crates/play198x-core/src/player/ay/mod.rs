@@ -4,13 +4,25 @@ use crate::host::spectrum::SpectrumHost;
 use emu198x_gi_ay_3_8910::Ay3_8910;
 use format::{AyError, AyFile, Song};
 
-/// T-states in one 50Hz frame on a 48K Spectrum: 3.5MHz / 50.
-const T_STATES_PER_FRAME: u32 = 69_888;
+// `T_STATES_PER_FRAME` and `AY_CLOCK_HZ` must come from the same machine:
+// the AY is 128K-only hardware (an `.ay` file targets the 128K's sound, not
+// the 48K's, which has no AY at all), so both constants below are the 128K
+// Spectrum's. An earlier version of this file paired the 48K's frame length
+// (69,888 T-states, from its 3.5MHz clock) with the 128K's AY clock — two
+// different machines' numbers in one model — which under-fed the chip's
+// downsampler by 524 ticks a frame (a silent gap at the end of every frame:
+// a 50Hz buzz, and playback fractionally slow). Do not "fix" `AY_CLOCK_HZ`
+// downward to make the arithmetic line up instead: it sets the pitch the
+// chip produces, so lowering it would detune every tune to cancel an
+// unrelated error in the frame-length constant.
+/// T-states in one 50Hz frame on a 128K Spectrum: 228 T-states/line x 311
+/// lines = 70,908, from a 3,546,900Hz CPU clock (≈50.02Hz refresh).
+const T_STATES_PER_FRAME: u32 = 70_908;
 /// Where the stub parks a return address so a call's end is detectable.
 const SENTINEL: u16 = 0xFFFF;
 /// A call that has not returned by here is not going to.
 const CALL_BUDGET: u32 = T_STATES_PER_FRAME * 8;
-/// The AY's clock on a Spectrum: the Z80's 3.5MHz halved.
+/// The 128K AY's clock: its 3,546,900Hz CPU clock halved.
 const AY_CLOCK_HZ: u32 = 1_773_400;
 /// AY ticks per `step_with_chip` call, expressed as a divisor rather than a
 /// float. `SpectrumHost::step()` (and so `step_with_chip`) advances the
