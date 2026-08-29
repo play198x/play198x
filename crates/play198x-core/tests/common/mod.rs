@@ -230,6 +230,155 @@ pub fn left(interleaved: &[f32]) -> impl Iterator<Item = f32> + '_ {
     interleaved.as_chunks::<2>().0.iter().map(|frame| frame[0])
 }
 
+/// The `HiReg` this crate's one-song fixture carries: the high half of every
+/// common register pair (`A`, `B`, `D`, `H`, `IXH`, `IYH`).
+///
+/// Distinct from [`FIXTURE_LO_REG`] and not a mirror of it, so the two
+/// halves can be told apart by value alone. A builder writing the two bytes
+/// in the order a parser reads them agrees with that parser whether or not
+/// either matches the format, so interchangeable values here would leave a
+/// swap undetectable everywhere this fixture is used. Which half sits at
+/// which offset is pinned separately, against a literal byte array, by
+/// `tests/ay_format.rs`.
+pub const FIXTURE_HI_REG: u8 = 0x22;
+
+/// The `LoReg` this crate's one-song fixture carries: the low half of every
+/// common register pair (`F`, `C`, `E`, `L`, `IXL`, `IYL`). See
+/// [`FIXTURE_HI_REG`].
+pub const FIXTURE_LO_REG: u8 = 0x11;
+
+/// Builds a one-song `.ay` file in code — no fixture files, per this
+/// repository's rule.
+///
+/// Its `HiReg`/`LoReg` are [`FIXTURE_HI_REG`] and [`FIXTURE_LO_REG`]; the
+/// rest is fixed too — author `"Steve"`, misc `"notes"`, the song named
+/// `"Test Tune"`, `SongLength` 500, `FadeLength` 50, `Stack` 0xC000 —
+/// because the `ay` player tests only vary `init`, `interrupt` and the
+/// single block.
+pub fn build_ay(init: u16, interrupt: u16, block_address: u16, code: &[u8]) -> Vec<u8> {
+    build_ay_songs(
+        &[(FIXTURE_HI_REG, FIXTURE_LO_REG)],
+        init,
+        interrupt,
+        block_address,
+        code,
+    )
+}
+
+/// Builds an `.ay` file carrying one song per `(HiReg, LoReg)` pair given.
+///
+/// Every song shares one code block and one pair of entry points, so the
+/// only thing that varies between them is the register state their init
+/// routine starts with — which is what a multi-song `.ay` actually does:
+/// real files select a subtune by the number the format hands `init` in
+/// `A`, the high half of `AF`.
+///
+/// The layout is the `.ay` structure from the format's specification:
+/// `ZXAYEMUL` header, a song table of two pointers per song, one data
+/// structure per song with its own points and address blocks, each
+/// terminated by an `Address == 0` entry. Every pointer is signed,
+/// big-endian, and relative to its own position.
+pub fn build_ay_songs(
+    songs: &[(u8, u8)],
+    init: u16,
+    interrupt: u16,
+    block_address: u16,
+    code: &[u8],
+) -> Vec<u8> {
+    assert!(
+        !songs.is_empty() && songs.len() <= 256,
+        "an .ay file carries 1..=256 songs"
+    );
+    let mut b = Vec::new();
+    b.extend_from_slice(b"ZXAYEMUL");
+    b.push(0); // FileVersion
+    b.push(3); // PlayerVersion
+    b.extend_from_slice(&0i16.to_be_bytes()); // PSpecialPlayer (10)
+    let author_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PAuthor (12)
+    let misc_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PMisc (14)
+    b.push((songs.len() - 1) as u8); // NumOfSongs - 1
+    b.push(0); // FirstSong
+    let songs_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PSongsStructure (18)
+
+    // Song table: two pointers per song.
+    let songs_at = b.len();
+    let mut name_ptr_at = Vec::new();
+    let mut data_ptr_at = Vec::new();
+    for _ in songs {
+        name_ptr_at.push(b.len());
+        b.extend_from_slice(&0i16.to_be_bytes());
+        data_ptr_at.push(b.len());
+        b.extend_from_slice(&0i16.to_be_bytes());
+    }
+
+    let author_at = b.len();
+    b.extend_from_slice(b"Steve\0");
+    let misc_at = b.len();
+    b.extend_from_slice(b"notes\0");
+    let mut name_at = Vec::new();
+    for index in 0..songs.len() {
+        name_at.push(b.len());
+        if songs.len() == 1 {
+            b.extend_from_slice(b"Test Tune\0");
+        } else {
+            b.extend_from_slice(format!("Test Tune {index}\0").as_bytes());
+        }
+    }
+
+    let mut data_at = Vec::new();
+    let mut points_ptr_at = Vec::new();
+    let mut addrs_ptr_at = Vec::new();
+    let mut points_at = Vec::new();
+    let mut block_ptr_at = Vec::new();
+    let mut block_at = Vec::new();
+
+    for &(hi_reg, lo_reg) in songs {
+        data_at.push(b.len());
+        b.extend_from_slice(&[0, 1, 2, 3]); // AChan..Noise (data+0)
+        b.extend_from_slice(&500u16.to_be_bytes()); // SongLength (data+4)
+        b.extend_from_slice(&50u16.to_be_bytes()); // FadeLength (data+6)
+        b.push(hi_reg); // HiReg (data+8)
+        b.push(lo_reg); // LoReg (data+9)
+        points_ptr_at.push(b.len()); // PPoints (data+10)
+        b.extend_from_slice(&0i16.to_be_bytes());
+        addrs_ptr_at.push(b.len()); // PAddresses (data+12)
+        b.extend_from_slice(&0i16.to_be_bytes());
+
+        points_at.push(b.len());
+        b.extend_from_slice(&0xC000u16.to_be_bytes()); // Stack
+        b.extend_from_slice(&init.to_be_bytes());
+        b.extend_from_slice(&interrupt.to_be_bytes());
+
+        block_ptr_at.push(b.len() + 4);
+        b.extend_from_slice(&block_address.to_be_bytes()); // Address
+        b.extend_from_slice(&(code.len() as u16).to_be_bytes()); // Length
+        b.extend_from_slice(&0i16.to_be_bytes()); // Offset, patched below
+        b.extend_from_slice(&0u16.to_be_bytes()); // terminator
+
+        block_at.push(b.len());
+        b.extend_from_slice(code);
+    }
+
+    let patch = |b: &mut Vec<u8>, at: usize, target: usize| {
+        let delta = (target as i32 - at as i32) as i16;
+        b[at..at + 2].copy_from_slice(&delta.to_be_bytes());
+    };
+    patch(&mut b, author_ptr_at, author_at);
+    patch(&mut b, misc_ptr_at, misc_at);
+    patch(&mut b, songs_ptr_at, songs_at);
+    for index in 0..songs.len() {
+        patch(&mut b, name_ptr_at[index], name_at[index]);
+        patch(&mut b, data_ptr_at[index], data_at[index]);
+        patch(&mut b, points_ptr_at[index], points_at[index]);
+        patch(&mut b, addrs_ptr_at[index], block_ptr_at[index] - 4);
+        patch(&mut b, block_ptr_at[index], block_at[index]);
+    }
+    b
+}
+
 /// The pitch of every waveform cycle in the left channel: `(frame, hz)`.
 ///
 /// Per waveform cycle, from positive-going zero crossings — never

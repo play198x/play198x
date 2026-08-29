@@ -6,8 +6,8 @@ name = "play198x-core"
 # emu198x/emu198x#1214. Stated explicitly rather than left to cargo default,
 # so that inverting it has to be a deliberate edit rather than an omission.
 publish = true
-version = "0.1.3"
-description = "Open, identify and render retro media — Spectrum, C64 and Amiga images, and ProTracker modules."
+version = "0.2.0"
+description = "Open, identify and render retro media — Spectrum, C64 and Amiga images, ProTracker modules, and Spectrum .ay tunes (playback behind the `ay` feature)."
 keywords = ["retro", "amiga", "protracker", "c64", "spectrum"]
 categories = ["multimedia", "emulators"]
 readme = "README.md"
@@ -33,6 +33,12 @@ repository.workspace = true
 zip = { version = "8", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
+
+# AY-3-8910 chip emulation and Z80 CPU for the `ay` feature. Off by default: a
+# consumer decoding a SCREEN$ should not acquire a Z80 and sound chip just to
+# render an image.
+emu198x-zilog-z80 = { version = "0.6", optional = true }
+emu198x-gi-ay-3-8910 = { version = "0.6", optional = true }
 
 # Amiga disk images. 0.2.3 specifically: it is the release that tells a
 # non-DOS disk apart from a damaged one, and names the containers (IPF, DMS,
@@ -64,6 +70,12 @@ format198x-commodore-amiga-ilbm = "0.1.1"
 format198x-commodore-c64-koala = "0.1.1"
 format198x-commodore-c64-art-studio = "0.1.1"
 format198x-sinclair-zx-spectrum-scr = "0.1.1"
+
+[features]
+default = []
+# The code-driven audio slice. Off by default: a consumer decoding a SCREEN$
+# should not acquire a Z80 to do it. See the spec's "Where it lives".
+ay = ["dep:emu198x-zilog-z80", "dep:emu198x-gi-ay-3-8910"]
 
 [lints]
 workspace = true

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/play198x/play198x/compare/play198x-core-v0.1.3...play198x-core-v0.2.0) - 2026-08-29
+
+### Added
+
+- play Spectrum `.ay` tunes, behind the optional `ay` feature. An `.ay` file is
+  Z80 code plus the addresses to call, not sample data, so `AyPlayer` loads the
+  tune's blocks into a bare 128K Spectrum host — RAM, a CPU, and the two ports a
+  tune makes a noise with — runs its init routine, then calls its interrupt
+  routine once per 50Hz frame and renders the AY chip and the beeper together.
+  No ROM is loaded and none is needed. The feature is off by default: a consumer
+  decoding a SCREEN$ should not acquire a Z80 and a sound chip to do it.
+- identify an `.ay` file and report what it says about itself, with no feature
+  needed. `probe::identify` returns the new `Format::Ay` from the eight-byte
+  `ZXAYEMUL` magic, and `Metadata::Ay` carries the file's author, its misc
+  field, and every song's name. Both are ungated because naming a format costs
+  nothing a caller has to pay for; only playing it needs the CPU.
+
+### Changed
+
+- **Breaking: `Metadata` has a new `Ay` variant.** `Metadata` is deliberately
+  not `#[non_exhaustive]` (see its own doc), so an exhaustive `match` on it in
+  a consumer stops compiling until it handles `Metadata::Ay`. Taken knowingly:
+  the alternative — marking the enum `#[non_exhaustive]` to avoid this — would
+  force every consumer into a wildcard arm forever, which loses the compiler
+  error that tells them a new format has arrived. `Format` gained an `Ay`
+  variant too, but `Format` is already `#[non_exhaustive]`, so that one breaks
+  nothing.
+
 ## [0.1.3](https://github.com/play198x/play198x/compare/play198x-core-v0.1.2...play198x-core-v0.1.3) - 2026-08-27
 
 ### Fixed

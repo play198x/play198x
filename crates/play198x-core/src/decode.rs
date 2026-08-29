@@ -83,6 +83,17 @@ pub fn image(bytes: &[u8], format: Format) -> Result<Image, Error> {
             format,
             what: "a ProTracker module is music, not a picture; use `decode::module`".to_owned(),
         }),
+        // An `.ay` tune is Z80 code and data run on a virtual 128K Spectrum,
+        // not a picture — same reasoning as ProTracker above. `Format::Ay` is
+        // named here unconditionally even though playing one needs the `ay`
+        // feature, because refusing correctly does not: this arm exists in
+        // every build so identifying an `.ay` a build cannot play still gets
+        // an honest answer instead of one this match forgot to write.
+        Format::Ay => Err(Error::Decode {
+            format,
+            what: "an .ay tune is code for a Z80 to run, not a picture; use `player::ay`"
+                .to_owned(),
+        }),
     }
 }
 

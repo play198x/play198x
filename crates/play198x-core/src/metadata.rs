@@ -42,6 +42,17 @@ pub enum Metadata {
     Image(ImageMeta),
     /// A tune.
     Module(ModuleMeta),
+    /// A code-driven tune: an `.ay` file. This variant, and [`AyMeta`]
+    /// itself, are always present — only `ay_meta`, the sole constructor for
+    /// `AyMeta` (which is `#[non_exhaustive]`, so nothing outside this
+    /// module can build one by struct literal), is behind the `ay` feature,
+    /// because it needs an `AyFile`. A build without `ay` therefore has no
+    /// way to *produce* a `Metadata::Ay` — the benefit of keeping this
+    /// variant ungated is not that such a build can receive one, but that
+    /// every `match` on `Metadata`, everywhere, is forced to name this arm
+    /// rather than getting to skip it because the feature that would fill
+    /// it in happened to be off.
+    Ay(AyMeta),
 }
 
 /// What a ProTracker module says about itself.
@@ -88,6 +99,41 @@ pub struct ImageMeta {
     pub source: String,
 }
 
+/// What an `.ay` file says about itself.
+///
+/// The ZXAY/EMUL header carries [`Self::author`] (`PAuthor`) and
+/// [`Self::misc`] (`PMisc`) and nothing else — no title field, because the
+/// format was built for tune collections where a *song* has a name and the
+/// file holding them does not. [`Self::title`] and [`Self::length_frames`]
+/// are read from the file's first song instead: a browser asking "what is
+/// this?" needs one name to show, and the first song is the one a player
+/// opens by default.
+///
+/// Reading song 0 is safe for any file `ay_meta` actually sees: `.ay`
+/// stores a *last-song index* (`NumOfSongs`), so a stored `0` means one song,
+/// not none, and `player::ay::format::parse` always returns at least one.
+/// But `AyFile`'s fields are public, so nothing stops a caller building one
+/// by hand with an empty `songs` — `ay_meta` reads song 0 defensively
+/// rather than indexing it, and this struct says what that empty case
+/// produces rather than leaving it to guesswork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AyMeta {
+    /// The first song's name, standing in for a title the format has no
+    /// file-level field for. Empty when the file carries no songs.
+    pub title: String,
+    /// `PAuthor`, Latin-1, from the file header.
+    pub author: String,
+    /// `PMisc`, Latin-1, from the file header.
+    pub misc: String,
+    /// Every song's name, in file order — the full tune list a player would
+    /// offer, not just the one [`Self::title`] is drawn from.
+    pub songs: Vec<String>,
+    /// The first song's `SongLength` in 50Hz frames — how long a player
+    /// plays it before fading. Zero when the file carries no songs.
+    pub length_frames: u16,
+}
+
 /// Describe a module.
 ///
 /// # Cost
@@ -132,6 +178,27 @@ pub fn image_meta(image: &Image, source: &str) -> ImageMeta {
         // would silently lose every colour the picture did not use.
         palette: image.palette.clone(),
         source: source.to_owned(),
+    }
+}
+
+/// Describe an `.ay` file.
+///
+/// Behind the `ay` feature and not the struct it builds: this is the one
+/// piece of `.ay` metadata that needs an [`AyFile`](crate::player::ay::format::AyFile)
+/// to read, and that type only exists when `ay` is enabled. [`AyMeta`] and
+/// [`Metadata::Ay`] carry no such dependency, so a build without `ay` can
+/// still name and hold the shape — it just cannot fill one in from a real
+/// file itself.
+#[cfg(feature = "ay")]
+#[must_use]
+pub fn ay_meta(file: &crate::player::ay::format::AyFile) -> AyMeta {
+    let first = file.songs.first();
+    AyMeta {
+        title: first.map(|song| song.name.clone()).unwrap_or_default(),
+        author: file.author.clone(),
+        misc: file.misc.clone(),
+        songs: file.songs.iter().map(|song| song.name.clone()).collect(),
+        length_frames: first.map_or(0, |song| song.length_frames),
     }
 }
 

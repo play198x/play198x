@@ -296,9 +296,48 @@ fn the_metadata_enum_holds_one_shape_or_the_other() {
     match picture {
         Metadata::Image(meta) => assert_eq!(meta.source, "a.scr"),
         Metadata::Module(_) => panic!("a screen is not a module"),
+        Metadata::Ay(_) => panic!("a screen is not an .ay tune"),
     }
     match song {
         Metadata::Module(meta) => assert_eq!(meta.title, "TUNE"),
         Metadata::Image(_) => panic!("a module is not a picture"),
+        Metadata::Ay(_) => panic!("a module is not an .ay tune"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// .ay tunes
+// ---------------------------------------------------------------------------
+
+/// `AyMeta` and `Metadata::Ay` are always present (see their doc comments),
+/// but building one from a real file needs `ay_meta`, which is behind the
+/// `ay` feature because it takes an `AyFile`. That is the one part of this
+/// file that needs the feature; the exhaustive matches above do not, which
+/// is the whole point of the two rulings that split the gate this way.
+#[cfg(feature = "ay")]
+#[test]
+fn ay_meta_reports_the_first_songs_name_as_the_title() {
+    use play198x_core::metadata::ay_meta;
+    use play198x_core::player::ay::format::parse;
+
+    let bytes = common::build_ay(0x8000, 0x8010, 0x8000, &[0xAA, 0xBB, 0xCC, 0xDD]);
+    let file = parse(&bytes).unwrap();
+    let meta = ay_meta(&file);
+
+    // `.ay` carries no file-level title — only `PAuthor` and `PMisc` — so
+    // `AyMeta::title` and `AyMeta::length_frames` stand in with song 0's,
+    // per its doc comment.
+    assert_eq!(meta.title, "Test Tune");
+    assert_eq!(meta.author, "Steve");
+    assert_eq!(meta.misc, "notes");
+    assert_eq!(meta.songs, vec!["Test Tune".to_string()]);
+    assert_eq!(meta.length_frames, 500);
+
+    let wrapped = Metadata::Ay(meta);
+    match wrapped {
+        Metadata::Ay(meta) => assert_eq!(meta.author, "Steve"),
+        Metadata::Image(_) | Metadata::Module(_) => {
+            panic!("an .ay tune is neither a picture nor a module")
+        }
     }
 }

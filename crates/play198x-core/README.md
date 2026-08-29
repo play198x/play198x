@@ -1,7 +1,8 @@
 # play198x-core
 
 Open, identify and render retro media: Sinclair Spectrum, Commodore 64 and
-Commodore Amiga images, and ProTracker modules.
+Commodore Amiga images, ProTracker modules, and Spectrum `.ay` tunes
+(playback behind the `ay` feature).
 
 The library takes a path, works out what the bytes are, and hands back either an
 RGBA image or a module you can play. It is the engine underneath the Play198x
@@ -26,8 +27,13 @@ palette lookups those crates deliberately do not do, and the ProTracker engine.
 
 ## What it does not do
 
-No user interface, no audio device, no async. SID, AY, NSF and SAP need chip
-emulation and are not here. Animation formats are not here either.
+No user interface, no audio device, no async. SID, NSF and SAP need chip
+emulation this crate does not carry, and are not here. AY is the exception:
+identifying an `.ay` needs no chip at all (see "What it does"), and playing
+one — a virtual 128K Spectrum running the tune's own Z80 code, driving an
+AY-3-8910 — lives here behind the optional `ay` feature, off by default so a
+consumer decoding a picture never acquires a Z80 and sound chip to do it.
+Animation formats are not here either.
 
 ## Design constraints
 

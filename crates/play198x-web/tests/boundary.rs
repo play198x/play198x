@@ -127,6 +127,36 @@ fn an_unknown_format_name_is_an_error_not_a_guess() {
     assert!(play198x_web::decode_image(&screen(PAPER_CYAN_INK_BLACK), "jpeg").is_err());
 }
 
+// `Format::Ay` is not behind the core's `ay` feature (identifying one needs
+// no Z80), and this crate does not enable `ay` — so `probe` can hand back
+// `Format::Ay` in every build of this shell even though it never plays one.
+// Before `format_name` learned this variant, that case crossed as
+// `{format: "unknown", confidence: "certain"}`: an honest identification
+// turned into a false claim of ignorance at the exact boundary this task's
+// core change exists to keep honest. Eight bytes is every byte `identify`
+// reads to award `.ay` its `Certain`.
+#[wasm_bindgen_test]
+fn an_ay_file_probes_as_certain_even_though_this_shell_cannot_play_it() {
+    let probed = play198x_web::probe(b"ZXAYEMUL").expect("the ZXAY/EMUL header is enough");
+    assert_eq!(probed.format(), "ay");
+    assert_eq!(probed.confidence(), "certain");
+}
+
+/// `format_from_name("ay")` follows the same precedent as `"protracker"`:
+/// both name a real `Format` this shell cannot turn into a picture, and both
+/// are routed into `play198x_core::decode::image` anyway so its own named
+/// refusal reaches the caller, rather than this shell's generic "not a
+/// format this build knows" pretending the name was never recognised.
+#[wasm_bindgen_test]
+fn an_ay_file_is_a_named_refusal_not_an_unrecognised_format() {
+    let err = play198x_web::decode_image(b"ZXAYEMUL", "ay").unwrap_err();
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("not a picture"),
+        "an .ay tune must be refused with the core's own reason, not treated as an unrecognised format name: {message}"
+    );
+}
+
 /// A minimal valid ProTracker module: `M.K.` at offset 1080 (`MAGIC_OFFSET`
 /// in `format198x-commodore-amiga-mod`), a song length of one order naming
 /// pattern 0, and that one pattern stored as 1024 bytes of all-zero cells.

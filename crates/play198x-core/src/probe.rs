@@ -11,12 +11,13 @@
 //! |---|---|---|
 //! | ProTracker | a recognised magic at offset 1080 | [`Confidence::Certain`] |
 //! | ILBM | `FORM` at 0 and `ILBM` at 8 | [`Confidence::Certain`] |
+//! | `.ay` | `ZXAY` at 0 and `EMUL` at 4 | [`Confidence::Certain`] |
 //! | Koala | load address `0x6000` **and** length 10,003 | [`Confidence::Certain`] |
 //! | Art Studio | load address `0x2000` **and** length 9,002..=9,009 | [`Confidence::Probable`] |
 //! | SCR | length exactly 6,912, and nothing above matched | [`Confidence::Probable`] |
 //!
 //! **What separates the two halves of that table is whether a miss can be
-//! caught.** The three certain formats carry a magic number or a checksum, so
+//! caught.** The four certain formats carry a magic number or a checksum, so
 //! bytes that are not one of them fail to match rather than matching wrongly.
 //! The two probable ones have neither: a load address and a length are the
 //! whole signal, and plenty of files that are not Art Studio bitmaps begin
@@ -28,14 +29,15 @@
 //! identification is weak rather than presenting it as settled.
 //!
 //! The order is the substance, not an implementation detail. SCR is identified
-//! by its length and nothing else, so it must be tried last: an ILBM or a
-//! module that happens to run to 6,912 bytes is neither rare nor contrived, and
-//! testing the weak rule first would hand back a Spectrum screen for both.
+//! by its length and nothing else, so it must be tried last: an ILBM, a
+//! module or an `.ay` file that happens to run to 6,912 bytes is neither rare
+//! nor contrived, and testing the weak rule first would hand back a Spectrum
+//! screen for any of them.
 //!
 //! # Why a confidence and not a bare answer
 //!
-//! Four of the five rules rest on a magic number or on two independent facts
-//! agreeing. The fifth rests on a file being 6,912 bytes long, which is a
+//! Five of the six rules rest on a magic number or on two independent facts
+//! agreeing. The sixth rests on a file being 6,912 bytes long, which is a
 //! property any 6,912 bytes have. That is genuinely weak evidence and the
 //! return type says so, so an interface can present a `Probable` result
 //! differently — offer it, rather than assert it — instead of every caller
@@ -68,6 +70,11 @@ pub enum Format {
     Ilbm,
     /// ProTracker module.
     ProTracker,
+    /// ZXAY/EMUL `.ay` tune: Z80 code and data for a 128K Spectrum host to
+    /// run, not sample data. Identifying one needs only its eight-byte
+    /// header, so this variant and the rule below are not behind the `ay`
+    /// feature that its player and its Z80/AY host are — see `player::ay`.
+    Ay,
 }
 
 /// How much the evidence behind an identification is worth.
@@ -89,14 +96,27 @@ pub enum Confidence {
 #[must_use]
 pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
     // Strongest first. A magic number at a fixed offset identifies one format
-    // and nothing else, so these two can never be wrong about a file that
-    // merely has a coincidental length.
+    // and nothing else, so these three — this pair plus the `.ay` check right
+    // below them — can never be wrong about a file that merely has a
+    // coincidental length.
     if is_module(bytes) {
         return Some((Format::ProTracker, Confidence::Certain));
     }
 
     if is_ilbm(bytes) {
         return Some((Format::Ilbm, Confidence::Certain));
+    }
+
+    // `ZXAY` plus `EMUL`, eight bytes of magic in fixed positions — the same
+    // eight bytes `player::ay::format::parse` checks to accept the file.
+    //
+    // Not behind the `ay` feature, unlike everything that plays one. Naming
+    // this file costs eight byte comparisons; nothing here touches a Z80 or
+    // an AY chip. A default build that could plainly say ".ay" and instead
+    // reported nothing would be the exact silent failure this module's
+    // confidence system exists to avoid.
+    if bytes.len() >= 8 && &bytes[0..4] == b"ZXAY" && &bytes[4..8] == b"EMUL" {
+        return Some((Format::Ay, Confidence::Certain));
     }
 
     // Two independent facts each. A C64 file's first two bytes are the load
