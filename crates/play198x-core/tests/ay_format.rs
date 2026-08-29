@@ -1,7 +1,9 @@
 #![cfg(feature = "ay")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use play198x_core::metadata::ay_meta;
-use play198x_core::player::ay::format::{AyError, MAX_BLOCK_BYTES, MAX_BLOCKS, parse};
+use play198x_core::player::ay::format::{
+    AyError, MAX_BLOCK_BYTES, MAX_BLOCKS, MAX_STRING_BYTES, MAX_STRING_LEN, parse,
+};
 use play198x_core::probe::{Confidence, Format, identify};
 
 mod common;
@@ -158,11 +160,21 @@ fn every_song_keeps_its_own_register_halves() {
 /// structure whose address list repeats one block record, and every one of
 /// those records copies the whole file.
 ///
+/// Every string pointer is aimed at one shared region too, `text_len`
+/// non-NUL bytes long, so the same file can amplify through the text path
+/// with no blocks at all.
+///
 /// This is the amplifying shape a stranger's file can take, written out so
-/// the cap has something real to refuse. `songs` is capped at 256 by the
-/// format's one-byte count; `blocks` and `block_len` are what a hostile file
-/// varies to multiply a few kilobytes into gigabytes.
-fn amplifying_ay(songs: usize, blocks: usize, block_len: u16, padding: usize) -> Vec<u8> {
+/// the caps have something real to refuse. `songs` is capped at 256 by the
+/// format's one-byte count; `blocks`, `block_len` and `text_len` are what a
+/// hostile file varies to multiply a few kilobytes into gigabytes.
+fn amplifying_ay(
+    songs: usize,
+    blocks: usize,
+    block_len: u16,
+    padding: usize,
+    text_len: usize,
+) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(b"ZXAYEMUL");
     b.push(0); // FileVersion
@@ -188,8 +200,10 @@ fn amplifying_ay(songs: usize, blocks: usize, block_len: u16, padding: usize) ->
         b.extend_from_slice(&0i16.to_be_bytes()); // PSongData
     }
 
+    // One NUL-terminated string, shared by author, misc and every song name.
     let text_at = b.len();
-    b.push(0); // one empty NUL-terminated string, shared by author/misc/name
+    b.resize(b.len() + text_len, b'x');
+    b.push(0);
 
     let data_at = b.len();
     b.extend_from_slice(&[0, 1, 2, 3]);
@@ -256,7 +270,7 @@ fn a_file_that_amplifies_past_the_byte_cap_is_refused() {
     // 5.2 MB asked for, against a 4 MiB cap. The block count stays under
     // MAX_BLOCKS on purpose, so this test can only be passing because the
     // byte budget refused it.
-    let hostile = amplifying_ay(256, 8, u16::MAX, 3_000);
+    let hostile = amplifying_ay(256, 8, u16::MAX, 3_000, 0);
     assert!(
         hostile.len() < 8_192,
         "the hostile file itself must be small"
@@ -286,7 +300,7 @@ fn a_file_that_declares_more_blocks_than_the_cap_is_refused() {
     // 256 songs x 64 zero-length block records: 16,384 blocks, twice
     // MAX_BLOCKS, and not one byte of block data — so only the count cap
     // can refuse this.
-    let hostile = amplifying_ay(256, 64, 0, 0);
+    let hostile = amplifying_ay(256, 64, 0, 0, 0);
     const { assert!(256 * 64 > MAX_BLOCKS) };
     assert_eq!(parse(&hostile), Err(AyError::TooLarge));
 }
@@ -297,7 +311,7 @@ fn a_file_that_declares_more_blocks_than_the_cap_is_refused() {
 /// shape has to pass without help.
 #[test]
 fn a_file_the_size_of_the_largest_real_one_still_parses() {
-    let realistic = amplifying_ay(20, 2, u16::MAX, 12_800);
+    let realistic = amplifying_ay(20, 2, u16::MAX, 12_800, 75);
     let file = parse(&realistic).unwrap();
     assert_eq!(file.songs.len(), 20);
     assert_eq!(file.songs[0].blocks.len(), 2);
@@ -312,6 +326,100 @@ fn a_file_the_size_of_the_largest_real_one_still_parses() {
         "this fixture must exceed the largest real file's expansion, not sit under it: {total}"
     );
     assert!(total < MAX_BLOCK_BYTES);
+}
+
+/// Builds the string-amplifying shape: a valid 256-song file with no
+/// blocks, whose author, misc and every song name point at a tail
+/// containing no NUL, so each of the 258 strings reads from its pointer to
+/// end of file.
+///
+/// 0xFF fill because Latin-1 above 0x7F costs two UTF-8 bytes in the
+/// `String` this produces, which is the second half of the multiplier.
+fn string_amplifying_ay(total_len: usize) -> Vec<u8> {
+    let mut hostile = amplifying_ay(256, 0, 0, 0, 0);
+    let text_at = hostile.len();
+    hostile.resize(total_len, 0xFF);
+    // Author (12), misc (14) and all 256 name pointers (20, 24, ...). Every
+    // target is a couple of kilobytes away, so the deltas stay inside the
+    // signed range the format specifies — the reach of a pointer is not
+    // what is unbounded here, the read from it is.
+    for at in [12usize, 14]
+        .into_iter()
+        .chain((0..256).map(|i| 20 + i * 4))
+    {
+        let delta = (text_at as i32 - at as i32) as i16;
+        hostile[at..at + 2].copy_from_slice(&delta.to_be_bytes());
+    }
+    hostile
+}
+
+/// A file with no blocks at all must not amplify through its strings.
+///
+/// The block caps are consulted only inside the block loop, so a file
+/// declaring zero blocks never reaches either of them. It can still aim all
+/// 258 of its string pointers at one region with no NUL in it, and the
+/// format gives a string no length — only a pointer and a NUL to stop at —
+/// so each one reads to end of file.
+///
+/// Measured on this machine with the caps lifted: 2,001,067 bytes expanded
+/// to 1,032,000,000 bytes of `String` in 671 ms, a 515x amplification
+/// through a path consulting neither block cap.
+#[test]
+fn a_file_that_amplifies_through_its_strings_is_refused() {
+    // A quarter of a megabyte is enough to prove the shape; the mechanism
+    // does not change with size, and the fixture is the test's own cost.
+    let hostile = string_amplifying_ay(256 * 1024);
+
+    let started = std::time::Instant::now();
+    assert_eq!(parse(&hostile), Err(AyError::TooLarge));
+    // Refusing has to be cheap as well as bounded. `nt_string` stops
+    // looking one byte past MAX_STRING_LEN, so this costs a kilobyte of
+    // scanning rather than a pass over the file.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "refusing a hostile file took {:?}",
+        started.elapsed()
+    );
+}
+
+/// One string longer than [`MAX_STRING_LEN`] is refused on its own, before
+/// the whole-file budget is anywhere near spent — the two caps bound
+/// different shapes, and a single unbounded string is the one the budget
+/// alone would let through on a one-song file.
+#[test]
+fn a_single_over_long_string_is_refused() {
+    let hostile = amplifying_ay(1, 0, 0, 0, MAX_STRING_LEN + 1);
+    const { assert!(MAX_STRING_LEN + 1 < MAX_STRING_BYTES) };
+    assert_eq!(parse(&hostile), Err(AyError::TooLarge));
+
+    // And one byte under the cap still parses, so the boundary is where it
+    // is claimed to be rather than somewhere convenient.
+    let allowed = amplifying_ay(1, 0, 0, 0, MAX_STRING_LEN);
+    let file = parse(&allowed).unwrap();
+    assert_eq!(file.author.chars().count(), MAX_STRING_LEN);
+}
+
+/// The string caps must sit above what real files need. The longest string
+/// in the 696-file archive is 75 bytes and the largest total is 749, in a
+/// file carrying 18 of them.
+#[test]
+fn the_string_lengths_real_files_use_still_parse() {
+    let realistic = amplifying_ay(20, 1, 256, 0, 75);
+    let file = parse(&realistic).unwrap();
+    assert_eq!(file.songs.len(), 20);
+    assert_eq!(file.author.chars().count(), 75);
+    let total = file.author.chars().count()
+        + file.misc.chars().count()
+        + file
+            .songs
+            .iter()
+            .map(|song| song.name.chars().count())
+            .sum::<usize>();
+    assert!(
+        total > 749,
+        "this fixture must exceed the largest real file's text, not sit under it: {total}"
+    );
+    assert!(total < MAX_STRING_BYTES);
 }
 
 /// `parse` must answer rather than panic on whatever bytes it is handed.

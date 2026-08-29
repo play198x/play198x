@@ -48,6 +48,33 @@ pub enum AyError {
 /// stay in the hundreds of kilobytes.
 pub const MAX_BLOCKS: usize = 8_192;
 
+/// The longest single NUL-terminated string `parse` will read.
+///
+/// These are display text — an author, a note, a song title — and the file
+/// gives them no length, only a pointer and a NUL to stop at. A pointer into
+/// a region with no NUL in it runs to end of file, once per string.
+///
+/// Measured across the 696-file World of Spectrum AY archive on 2026-08-29:
+/// the longest string in the whole archive is 75 bytes. A kilobyte is 13x
+/// that, and longer than any label a person types.
+pub const MAX_STRING_LEN: usize = 1_024;
+
+/// The most string data `parse` will read out of one file, across the
+/// author, the misc field and every song's name.
+///
+/// [`MAX_STRING_LEN`] bounds one string; this bounds the 258 of them a
+/// 256-song file can ask for, which is the same distinction
+/// [`MAX_BLOCKS`] draws against [`MAX_BLOCK_BYTES`]. Every song's name
+/// pointer can name the same region, so the per-string cap alone leaves a
+/// 256x multiplier standing.
+///
+/// Measured across the same archive: the largest total is 749 bytes, in a
+/// file carrying 18 strings. Sixty-four kibibytes is 87x that, and still
+/// 3.4x what a hypothetical 256-song file would need with every name at the
+/// archive's longest. Latin-1 above 0x7F becomes two UTF-8 bytes, so the
+/// `String`s this bounds cost at most twice this.
+pub const MAX_STRING_BYTES: usize = 64 * 1024;
+
 /// The most block data `parse` will copy out of one file.
 ///
 /// A block's declared length is two bytes, and its bytes are copied from
@@ -179,12 +206,27 @@ fn follow(bytes: &[u8], at: usize) -> Result<usize, AyError> {
 
 /// A NUL-terminated Latin-1 string. Amiga and Spectrum text is Latin-1, not
 /// UTF-8; reading it as UTF-8 mangles accents and box-drawing bytes.
-fn nt_string(bytes: &[u8], at: usize) -> String {
-    bytes[at..]
+///
+/// Bounded twice, against [`MAX_STRING_LEN`] and the caller's running
+/// [`MAX_STRING_BYTES`] budget. The file states no length for these, only a
+/// pointer and a NUL to stop at, so a pointer into a region containing no
+/// NUL reads to end of file — and a 256-song file can aim all 258 of its
+/// string pointers at that one region without declaring a single block.
+///
+/// The scan is bounded as well as the allocation: `take` stops it one byte
+/// past the cap, so an over-long string costs a kilobyte of looking rather
+/// than a pass over the whole file.
+fn nt_string(bytes: &[u8], at: usize, budget: &mut usize) -> Result<String, AyError> {
+    let len = bytes[at..]
         .iter()
+        .take(MAX_STRING_LEN + 1)
         .take_while(|&&b| b != 0)
-        .map(|&b| b as char)
-        .collect()
+        .count();
+    if len > MAX_STRING_LEN || len > *budget {
+        return Err(AyError::TooLarge);
+    }
+    *budget -= len;
+    Ok(bytes[at..at + len].iter().map(|&b| b as char).collect())
 }
 
 /// Reads an `.ay` file's structure. Loads no code and runs nothing.
@@ -192,16 +234,28 @@ fn nt_string(bytes: &[u8], at: usize) -> String {
 /// # Errors
 ///
 /// When the magic is wrong, the file ends inside a structure, a pointer
-/// resolves outside it, or the file asks for more blocks or block bytes
-/// than [`MAX_BLOCKS`] and [`MAX_BLOCK_BYTES`] allow.
+/// resolves outside it, or the file asks for more than [`MAX_BLOCKS`],
+/// [`MAX_BLOCK_BYTES`], [`MAX_STRING_LEN`] or [`MAX_STRING_BYTES`] allow.
+///
+/// # What this can allocate
+///
+/// Every allocation here is bounded, and the bound does not depend on the
+/// input's length: at most [`MAX_BLOCK_BYTES`] of block data, plus
+/// [`MAX_BLOCKS`] `Block` structures, plus twice [`MAX_STRING_BYTES`] of
+/// text (Latin-1 above 0x7F costs two UTF-8 bytes), plus one `Song` per
+/// song and the format allows 256 of those. Around 4.4 MiB, from any bytes
+/// at all. Stated as a total because the caps were added one path at a
+/// time, and a per-path cap is only a defence if no path is left without
+/// one.
 pub fn parse(bytes: &[u8]) -> Result<AyFile, AyError> {
     if bytes.len() < 20 || &bytes[0..4] != b"ZXAY" || &bytes[4..8] != b"EMUL" {
         return Err(AyError::NotAnAyFile);
     }
 
     let player_version = bytes[9];
-    let author = nt_string(bytes, follow(bytes, 12)?);
-    let misc = nt_string(bytes, follow(bytes, 14)?);
+    let mut text_left = MAX_STRING_BYTES;
+    let author = nt_string(bytes, follow(bytes, 12)?, &mut text_left)?;
+    let misc = nt_string(bytes, follow(bytes, 14)?, &mut text_left)?;
     let count = bytes[16] as usize + 1;
     let songs_at = follow(bytes, 18)?;
 
@@ -210,7 +264,7 @@ pub fn parse(bytes: &[u8]) -> Result<AyFile, AyError> {
     let mut bytes_left = MAX_BLOCK_BYTES;
     for i in 0..count {
         let entry = songs_at + i * 4;
-        let name = nt_string(bytes, follow(bytes, entry)?);
+        let name = nt_string(bytes, follow(bytes, entry)?, &mut text_left)?;
         let data = follow(bytes, entry + 2)?;
 
         let points = follow(bytes, data + 10)?;
