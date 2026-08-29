@@ -11,7 +11,7 @@
 //! |---|---|---|
 //! | ProTracker | a recognised magic at offset 1080 | [`Confidence::Certain`] |
 //! | ILBM | `FORM` at 0 and `ILBM` at 8 | [`Confidence::Certain`] |
-//! | `.ay` | `ZXAY` at 0 and `EMUL` at 4 | [`Confidence::Certain`] |
+//! | `.ay` | `ZXAY` at 0, `EMUL` at 4, and at least [`AY_MIN_LEN`] bytes | [`Confidence::Certain`] |
 //! | Koala | load address `0x6000` **and** length 10,003 | [`Confidence::Certain`] |
 //! | Art Studio | load address `0x2000` **and** length 9,002..=9,009 | [`Confidence::Probable`] |
 //! | SCR | length exactly 6,912, and nothing above matched | [`Confidence::Probable`] |
@@ -71,9 +71,10 @@ pub enum Format {
     /// ProTracker module.
     ProTracker,
     /// ZXAY/EMUL `.ay` tune: Z80 code and data for a 128K Spectrum host to
-    /// run, not sample data. Identifying one needs only its eight-byte
-    /// header, so this variant and the rule below are not behind the `ay`
-    /// feature that its player and its Z80/AY host are — see `player::ay`.
+    /// run, not sample data. Identifying one needs eight bytes of magic and
+    /// a file long enough to hold a header ([`AY_MIN_LEN`]) — no Z80 and no
+    /// sound chip — so this variant and the rule below are not behind the
+    /// `ay` feature that its player and its host are; see `player::ay`.
     Ay,
 }
 
@@ -86,6 +87,21 @@ pub enum Confidence {
     /// a length or a load address that other things also have.
     Probable,
 }
+
+/// The shortest run of bytes `player::ay::format::parse` accepts as an `.ay`
+/// file: the fixed header, through `PSongsStructure` at offset 18.
+///
+/// Declared here and used by the parser, rather than the other way round,
+/// because [`identify`] is not behind the `ay` feature and the parser is.
+/// The two have to agree: a length only one of them enforces means a file can
+/// identify as [`Confidence::Certain`] and then fail to parse as the `.ay`
+/// parser's `NotAnAyFile`, which is a worse answer than either alone.
+/// (Unlinked deliberately: a link from this module to a gated one cannot
+/// resolve in a default build, and would be a rustdoc warning on every
+/// consumer that never asked for a Z80.) Written once for the same reason
+/// the `.ay` rule itself is not gated — see this module's note on naming a
+/// format without acquiring a Z80 to do it.
+pub const AY_MIN_LEN: usize = 20;
 
 /// Work out what `bytes` are.
 ///
@@ -107,15 +123,17 @@ pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
         return Some((Format::Ilbm, Confidence::Certain));
     }
 
-    // `ZXAY` plus `EMUL`, eight bytes of magic in fixed positions — the same
-    // eight bytes `player::ay::format::parse` checks to accept the file.
+    // `ZXAY` plus `EMUL`, eight bytes of magic in fixed positions, and the
+    // header length the parser also insists on — the same two tests
+    // `player::ay::format::parse` applies to accept the file, sharing the
+    // same constant so the pair cannot drift into disagreeing.
     //
     // Not behind the `ay` feature, unlike everything that plays one. Naming
-    // this file costs eight byte comparisons; nothing here touches a Z80 or
-    // an AY chip. A default build that could plainly say ".ay" and instead
+    // this file costs eight byte comparisons and a length check; nothing
+    // here touches a Z80 or an AY chip. A default build that could plainly say ".ay" and instead
     // reported nothing would be the exact silent failure this module's
     // confidence system exists to avoid.
-    if bytes.len() >= 8 && &bytes[0..4] == b"ZXAY" && &bytes[4..8] == b"EMUL" {
+    if bytes.len() >= AY_MIN_LEN && &bytes[0..4] == b"ZXAY" && &bytes[4..8] == b"EMUL" {
         return Some((Format::Ay, Confidence::Certain));
     }
 

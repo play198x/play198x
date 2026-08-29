@@ -314,6 +314,10 @@ fn the_metadata_enum_holds_one_shape_or_the_other() {
 /// `ay` feature because it takes an `AyFile`. That is the one part of this
 /// file that needs the feature; the exhaustive matches above do not, which
 /// is the whole point of the two rulings that split the gate this way.
+///
+/// The single place `AyMeta`'s fields are pinned. `tests/ay_format.rs` had a
+/// second test asserting the same five against the same fixture, which only
+/// this one also carries through the `Metadata` wrapping.
 #[cfg(feature = "ay")]
 #[test]
 fn ay_meta_reports_the_first_songs_name_as_the_title() {

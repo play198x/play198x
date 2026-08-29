@@ -248,7 +248,8 @@ fn nt_string(bytes: &[u8], at: usize, budget: &mut usize) -> Result<String, AyEr
 /// time, and a per-path cap is only a defence if no path is left without
 /// one.
 pub fn parse(bytes: &[u8]) -> Result<AyFile, AyError> {
-    if bytes.len() < 20 || &bytes[0..4] != b"ZXAY" || &bytes[4..8] != b"EMUL" {
+    if bytes.len() < crate::probe::AY_MIN_LEN || &bytes[0..4] != b"ZXAY" || &bytes[4..8] != b"EMUL"
+    {
         return Err(AyError::NotAnAyFile);
     }
 
