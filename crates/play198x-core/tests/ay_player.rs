@@ -788,3 +788,87 @@ fn the_host_answers_the_ay_port_with_no_player_driving_it() {
         "a host with no chip fitted must read as the unattached bus it is"
     );
 }
+
+/// The sentinel is only a return when an instruction *finished* on the cycle
+/// PC reached it.
+///
+/// `Z80::instruction_complete` looks like the predicate for that and is not:
+/// the crate documents it as a level that stays true throughout the
+/// following opcode fetch. So an instruction sitting at 0xFFFE satisfies it
+/// while its own operand byte — the one at 0xFFFF — is still being fetched,
+/// and `call` reports a return that has not happened and stops the CPU
+/// part-way through the instruction. The next frame then resumes that
+/// instruction against the next routine's first byte.
+///
+/// This fixture puts `LD A,0x7B` at 0xFFFE, so PC passes through the
+/// sentinel mid-instruction and then wraps to the `RET` stub, which pops the
+/// real return. A player that stops on the level flag never loads `A`.
+///
+///   init at 0x0001:      the RET stub, so init returns at once
+///   interrupt at 0xFFFE: 3E 7B  LD A,0x7B   (PC = 0xFFFF for the operand)
+///                        then PC wraps to 0x0000 and the stub RETs
+#[test]
+fn the_sentinel_is_a_return_only_at_an_instruction_boundary() {
+    // Not `init == 0`: the format reads that as "start at the first block's
+    // address", which is the fixture's code rather than the stub.
+    let bytes = build_ay(0x0001, 0xFFFE, 0xFFFE, &[0x3E, 0x7B]);
+    let mut player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+
+    assert!(player.frame(), "the routine did return, by way of the stub");
+    assert_eq!(
+        player.host.cpu.regs.af >> 8,
+        0x7B,
+        "the routine was stopped part-way through the instruction at 0xFFFE"
+    );
+    assert_eq!(player.host.cpu.regs.pc, 0xFFFF);
+}
+
+/// A `sample_rate` of zero is nonsense and must not panic or produce
+/// infinities. `Engine::new` makes the same ruling for the same reason; this
+/// is the `.ay` player's half of it, and it needs a second floor `Engine`
+/// does not, because a frame's sample count is a divisor here.
+#[test]
+fn a_zero_sample_rate_is_survived_rather_than_panicked_on() {
+    let mut player = AyPlayer::new(&ay_with_observable_stub(), 0, 0).unwrap();
+    let mut out = vec![0.0f32; 64];
+    for _ in 0..3 {
+        player.frame();
+        let frames = player.render(&mut out);
+        assert!(frames <= 32);
+    }
+    assert!(
+        player.peak_before_clamp().is_finite(),
+        "a zero sample rate produced a non-finite peak"
+    );
+}
+
+/// Frame 0 is frame 0, not init's leftovers.
+///
+/// `new()` runs the tune's init routine through the whole host, so the chip
+/// has been accumulating output and the beeper buffer filling before any
+/// frame is asked for. Both are drained afterwards. The two accumulate at
+/// different rates, so leaving them would not merely delay the start — it
+/// would offset the chip against the beeper by different amounts.
+///
+///   init at 0x8000: writes the speaker high, programs channel A, then RET
+#[test]
+fn the_first_rendered_frame_does_not_carry_inits_output() {
+    let mut code = vec![0u8; 0x40];
+    code[..20].copy_from_slice(&[
+        0x3E, 0x10, // LD A,0x10
+        0xD3, 0xFE, // OUT (0xFE),A     speaker high
+        0x01, 0xFD, 0xFF, // LD BC,0xFFFD
+        0x3E, 0x08, // LD A,8
+        0xED, 0x79, // OUT (C),A        select R8
+        0x01, 0xFD, 0xBF, // LD BC,0xBFFD
+        0x3E, 0x0F, // LD A,0x0F
+        0xED, 0x79, // OUT (C),A        volume A full
+        0xC9, 0x00, // RET
+    ]);
+    let player = AyPlayer::new(&build_ay(0x8000, 0x8000, 0x8000, &code), 0, 48_000).unwrap();
+
+    assert!(
+        player.buffered_beeper_samples() == 0,
+        "init's beeper samples were carried into frame 0"
+    );
+}

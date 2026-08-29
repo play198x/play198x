@@ -169,7 +169,7 @@ impl SpectrumHost {
             Some(BusOp::IoWrite) => self.io_write(self.cpu.addr, self.cpu.data),
             Some(BusOp::IoRead) => {
                 let port = self.cpu.addr;
-                self.cpu.data_in = self.io_read(port);
+                self.cpu.data_in = self.answer_read(port);
                 self.io_read = Some(port);
             }
             Some(BusOp::IntAck) => self.cpu.data_in = 0xFF,
@@ -188,7 +188,7 @@ impl SpectrumHost {
     /// selects a register and reads it straight back without writing data to
     /// it first — real hardware answers that, and a chip whose selection
     /// only moved on data writes would not.
-    fn io_read(&mut self, port: u16) -> u8 {
+    fn answer_read(&mut self, port: u16) -> u8 {
         if port & AY_SELECT_DECODE_MASK != AY_SELECT_DECODE_MATCH {
             return UNATTACHED_BUS;
         }
