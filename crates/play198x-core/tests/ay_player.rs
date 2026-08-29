@@ -139,17 +139,14 @@ fn each_song_starts_with_its_own_register_state() {
     }
 }
 
-/// A tune that programs channel A and sets the volume must produce sound.
-/// Silence from a tune that ran is a failure, not a result — the whole
-/// reason this test exists is that a player which renders zeroes still looks
-/// like it works.
+/// Builds an `.ay` whose interrupt routine programs channel A and sets its
+/// volume, so the chip has something to render.
 ///   interrupt: writes AY registers 0 (fine tune), 1 (coarse), 7 (mixer),
 ///              8 (volume A), then RET
-#[test]
-fn a_tune_that_programs_the_chip_makes_a_noise() {
-    // 4 register-write sequences of 14 bytes each, starting at 0x10, need
-    // 72 bytes (0x10 + 4*14 = 0x48) plus the trailing RET — a vec![0u8; 0x40]
-    // (64 bytes) is too small and panics on the out-of-bounds slice copy.
+fn ay_that_programs_channel_a() -> Vec<u8> {
+    // 4 register-write sequences of 14 bytes each start at 0x10, so the
+    // block runs to 0x48 plus a trailing RET. 0x80 bytes, with room to
+    // spare.
     let mut code = vec![0u8; 0x80];
     // LD BC,0xFFFD / LD A,reg / OUT (C),A / LD BC,0xBFFD / LD A,val / OUT (C),A
     let mut at = 0x10;
@@ -162,8 +159,16 @@ fn a_tune_that_programs_the_chip_makes_a_noise() {
         at += 14;
     }
     code[at] = 0xC9; // RET
+    build_ay(0x8000, 0x8010, 0x8000, &code)
+}
 
-    let bytes = build_ay(0x8000, 0x8010, 0x8000, &code);
+/// A tune that programs channel A and sets the volume must produce sound.
+/// Silence from a tune that ran is a failure, not a result — the whole
+/// reason this test exists is that a player which renders zeroes still looks
+/// like it works.
+#[test]
+fn a_tune_that_programs_the_chip_makes_a_noise() {
+    let bytes = ay_that_programs_channel_a();
     let mut player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
 
     let mut peak = 0.0f32;
@@ -178,6 +183,52 @@ fn a_tune_that_programs_the_chip_makes_a_noise() {
     assert!(
         peak > 0.01,
         "the chip was programmed but rendered silence (peak {peak})"
+    );
+}
+
+/// The chip's output must swing about zero, not about half its own peak.
+///
+/// `emu198x-gi-ay-3-8910` sums three channels from a unipolar volume table,
+/// so its square wave arrives on a DC offset roughly half its amplitude.
+/// Left in, that offset is a click on every start and stop, spends about
+/// half the mix's headroom on something nobody can hear, and puts the chip
+/// and the already-AC-coupled beeper on two different reference levels. Peak
+/// alone cannot see any of that — a DC offset reads as loudness — so this
+/// measures the mean, and checks the signal is still there while doing it.
+#[test]
+fn the_chip_output_is_ac_coupled() {
+    let bytes = ay_that_programs_channel_a();
+    let mut player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+    let mut out = vec![0.0f32; 48_000 / 50 * 2];
+
+    // Past the filter's own start-up transient: at 35Hz it settles inside
+    // about one frame, so ten is well clear.
+    for _ in 0..10 {
+        player.frame();
+        player.render(&mut out);
+    }
+
+    let mut sum = 0.0f64;
+    let mut count = 0u32;
+    let mut peak = 0.0f32;
+    for _ in 0..25 {
+        player.frame();
+        player.render(&mut out);
+        for sample in &out {
+            sum += f64::from(*sample);
+            count += 1;
+            peak = peak.max(sample.abs());
+        }
+    }
+    let mean = sum / f64::from(count);
+
+    assert!(
+        peak > 0.01,
+        "nothing was rendered, so the mean below proves nothing (peak {peak})"
+    );
+    assert!(
+        mean.abs() < 0.05,
+        "the chip's output sits on a DC offset of {mean} against a peak of {peak}"
     );
 }
 

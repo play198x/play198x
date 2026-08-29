@@ -72,19 +72,19 @@ const AY_TICK_DIVISOR: u32 = 4;
 /// for the peak to approach `2A`. No real beeper engine plays a ~25Hz tone;
 /// it is an artifact of that fixture's shape, not of typical playback.
 ///
-/// The AY chip's own three channels already sum to `~1.0` at full volume
-/// (`~0.333` each) before the beeper is added at all, so there is no
-/// headroom budget in this mix regardless of the beeper's own gain — a
-/// clipping clamp is a real, open question. It is deliberately deferred to
-/// the whole-branch review, once the Task 8 corpus shows how many real
-/// tunes actually drive both the chip and the beeper together, and at what
-/// beeper frequencies, so the worst case is measured rather than guessed.
+/// Left at 0.5 rather than lowered to buy the mix headroom. The corpus is
+/// what settles that: 7 of 553 files drive the chip and the beeper
+/// together, 10 at ten times the frame budget, so detuning the other 522
+/// ay-only tunes to serve them would be paying the wrong bill. The headroom
+/// itself comes from AC-coupling the chip's output instead — see
+/// [`AyPlayer::render`], where the chip's unipolar sum is the thing actually
+/// eating the budget.
 const BEEPER_GAIN: f32 = 0.5;
 
-/// Target -3dB cutoff for the beeper's DC-blocking high-pass (see
-/// `AyPlayer::dc_r` and `sample_beeper`). Real hardware AC-couples the
-/// speaker, so a held level decays to silence instead of sitting as a
-/// constant offset; this is the digital equivalent. Chosen deliberately,
+/// Target -3dB cutoff for the DC-blocking high-pass both signal paths run
+/// through (see [`DcBlocker`]). Real hardware AC-couples the amplifier, so a
+/// held level decays to silence instead of sitting as a constant offset;
+/// this is the digital equivalent. Chosen deliberately,
 /// not copied from a canned `R`: a 1-bit beeper engine has no practical use
 /// below roughly 50Hz (the resolution and the audibility both fall apart
 /// down there), so 35Hz sits well clear of anything a tune would use as a
@@ -92,6 +92,48 @@ const BEEPER_GAIN: f32 = 0.5;
 /// output frame (20ms) rather than leaving a real click's decay tail
 /// hanging into the next frame or two.
 const DC_BLOCKER_CUTOFF_HZ: f32 = 35.0;
+
+/// The one-pole DC-blocking high-pass both the beeper and the AY chip run
+/// through: `y[n] = x[n] - x[n-1] + R*y[n-1]`.
+///
+/// One implementation, two instances. The two signals need the same filter
+/// and must not share its state — a filter is a memory of what it has
+/// already seen, so mixing two sources through one instance would make each
+/// one's transients appear in the other's output.
+struct DcBlocker {
+    /// The pole, `R`, derived from the caller's `sample_rate` so the cutoff
+    /// (see [`DC_BLOCKER_CUTOFF_HZ`]) — and so the decay time — stays the
+    /// same whatever rate this player runs at. A fixed literal would tie the
+    /// cutoff to whichever rate happened to be used when it was chosen, and
+    /// this player takes an arbitrary caller-supplied one (44.1kHz and 48kHz
+    /// are both realistic), so the two would otherwise sound subtly
+    /// different.
+    r: f32,
+    /// `x[n-1]`: the previous input sample.
+    prev_x: f32,
+    /// `y[n-1]`: the previous output. Carried across frame boundaries, never
+    /// reset per frame — resetting it would reintroduce a step at every
+    /// frame edge, audible as a click at 50Hz.
+    prev_y: f32,
+}
+
+impl DcBlocker {
+    /// `R = 1 - 2*pi*fc/fs` for a one-pole high-pass's -3dB point at `fc`.
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            r: 1.0 - (2.0 * std::f32::consts::PI * DC_BLOCKER_CUTOFF_HZ) / sample_rate as f32,
+            prev_x: 0.0,
+            prev_y: 0.0,
+        }
+    }
+
+    fn filter(&mut self, x: f32) -> f32 {
+        let y = x - self.prev_x + self.r * self.prev_y;
+        self.prev_x = x;
+        self.prev_y = y;
+        y
+    }
+}
 
 pub struct AyPlayer {
     pub host: SpectrumHost,
@@ -119,24 +161,12 @@ pub struct AyPlayer {
     /// same technique `emu198x-gi-ay-3-8910` uses internally for its own
     /// downsampling, so the two signals stay in step.
     beeper_accumulator: u32,
-    /// The DC-blocking high-pass's pole, `R` in
-    /// `y[n] = x[n] - x[n-1] + R*y[n-1]`, derived from the caller's
-    /// `sample_rate` in `new()` so the filter's cutoff (see
-    /// [`DC_BLOCKER_CUTOFF_HZ`]) — and so its decay time — stays the same
-    /// regardless of what rate this player runs at. A fixed literal `R`
-    /// would tie the cutoff to whichever sample rate happened to be used
-    /// when it was chosen; this player takes an arbitrary caller-supplied
-    /// rate (44.1kHz and 48kHz are both realistic), and the two would
-    /// otherwise sound subtly different — deriving `R` keeps them
-    /// identical.
-    dc_r: f32,
-    /// `x[n-1]`: the DC blocker's previous unfiltered beeper sample.
-    dc_prev_x: f32,
-    /// `y[n-1]`: the DC blocker's previous filtered output. Carried on the
-    /// player (not reset per frame) so the filter is continuous across
-    /// frame boundaries — resetting it every frame would reintroduce a
-    /// step at every frame edge, audible as a click at 50Hz.
-    dc_prev_y: f32,
+    /// AC-couples the speaker bit, so a level the tune holds decays instead
+    /// of sitting as a constant offset in every later frame.
+    beeper_dc: DcBlocker,
+    /// AC-couples the chip's output, for the same reason and against a
+    /// larger offset — see [`AyPlayer::render`].
+    ay_dc: DcBlocker,
 }
 
 impl AyPlayer {
@@ -199,10 +229,6 @@ impl AyPlayer {
         host.cpu.regs.iy = reg_pair;
 
         let samples_per_frame = (sample_rate / 50) as usize;
-        // R = 1 - 2*pi*fc/fs for a one-pole high-pass's -3dB point at fc,
-        // fs the sample rate — see `dc_r`'s field doc for why this is
-        // derived per-instance rather than a fixed literal.
-        let dc_r = 1.0 - (2.0 * std::f32::consts::PI * DC_BLOCKER_CUTOFF_HZ) / sample_rate as f32;
         let mut player = Self {
             host,
             song,
@@ -213,9 +239,8 @@ impl AyPlayer {
             t_states: 0,
             beeper: Vec::with_capacity(samples_per_frame),
             beeper_accumulator: 0,
-            dc_r,
-            dc_prev_x: 0.0,
-            dc_prev_y: 0.0,
+            beeper_dc: DcBlocker::new(sample_rate),
+            ay_dc: DcBlocker::new(sample_rate),
         };
         let init = if player.song.init == 0 {
             player.song.blocks.first().map_or(0, |b| b.address)
@@ -248,6 +273,27 @@ impl AyPlayer {
         let mut mono = vec![0.0f32; self.samples_per_frame];
         self.chip.end_frame(&mut mono);
 
+        // AC-couple the chip before anything is mixed into it.
+        // `emu198x-gi-ay-3-8910`'s `compute_output` sums three channels from
+        // a *unipolar* volume table (0.0 to 1.0) and divides by three, so
+        // its output never goes negative: a square wave arrives riding on a
+        // DC offset about half its own peak, and roughly half the headroom
+        // is spent on a component that is not audio. Real hardware couples
+        // the chip and the speaker through the same amplifier, so this is
+        // the physically right model as well as the one that buys the room —
+        // and it is host-side mixing, not chip emulation, so it stays inside
+        // the thin-consumer rule.
+        //
+        // It also has to happen before the beeper is added, and through its
+        // own filter state. `sample_beeper` already AC-couples the speaker;
+        // adding an un-coupled chip signal to an already-coupled beeper
+        // would mix two signals sitting on different reference levels, and
+        // sharing one filter instance between them would put each one's
+        // transients into the other's output.
+        for sample in &mut mono {
+            *sample = self.ay_dc.filter(*sample);
+        }
+
         // A tune that never wrote the speaker port has no beeper signal.
         // The DC blocker in `sample_beeper` now removes a *held* level's
         // offset on its own, so this guard is no longer preventing a sticky
@@ -270,10 +316,16 @@ impl AyPlayer {
         }
         self.beeper.clear();
 
+        // A backstop, not the mechanism. AC-coupling above is what keeps the
+        // mix inside range; this only states the range so a consumer can
+        // rely on it — an AudioWorklet handed a value above 1.0 hard-clips,
+        // and this crate should not be the thing that hands it one. With the
+        // coupling in place nothing in the 696-file corpus reaches it.
         for (i, sample) in mono.iter().enumerate() {
             if let Some(slot) = out.get_mut(i * 2..i * 2 + 2) {
-                slot[0] = *sample;
-                slot[1] = *sample;
+                let clamped = sample.clamp(-1.0, 1.0);
+                slot[0] = clamped;
+                slot[1] = clamped;
             }
         }
     }
@@ -334,8 +386,8 @@ impl AyPlayer {
     /// cycles emits exactly `samples_per_frame` samples a frame, every
     /// frame, with no truncation and no drift.
     ///
-    /// Each downsampled sample is passed through the DC-blocking high-pass
-    /// (`dc_r`, `dc_prev_x`, `dc_prev_y`) before it is buffered, so a level
+    /// Each downsampled sample is passed through this player's beeper
+    /// [`DcBlocker`] before it is buffered, so a level
     /// the tune holds — rather than toggles — decays instead of sitting as
     /// a constant offset in every later frame. This runs unconditionally,
     /// not gated on `host.speaker_written`: the filter's state must be
@@ -349,9 +401,7 @@ impl AyPlayer {
         if self.beeper_accumulator >= T_STATES_PER_FRAME * 2 {
             self.beeper_accumulator -= T_STATES_PER_FRAME * 2;
             let level = if self.host.speaker { 1.0 } else { -1.0 };
-            let filtered = level - self.dc_prev_x + self.dc_r * self.dc_prev_y;
-            self.dc_prev_x = level;
-            self.dc_prev_y = filtered;
+            let filtered = self.beeper_dc.filter(level);
             if self.beeper.len() < self.samples_per_frame {
                 self.beeper.push(filtered);
             }
