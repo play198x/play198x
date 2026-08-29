@@ -161,6 +161,11 @@ pub struct AyPlayer {
     /// One sample of the speaker bit per output sample, filled by
     /// `sample_beeper` as the CPU runs and drained by `render`.
     beeper: Vec<f32>,
+    /// The frame's mixed mono signal, before it is written out as stereo.
+    /// Owned by the player rather than built per call because `render` must
+    /// allocate nothing (see its doc), and its size is fixed at
+    /// construction: `samples_per_frame`, every frame.
+    mono: Vec<f32>,
     /// Bresenham-style accumulator for downsampling the beeper from host
     /// cycles (half T-states) to `samples_per_frame` output samples. Plain
     /// division (`T_STATES_PER_FRAME / samples_per_frame`) truncates and
@@ -249,6 +254,7 @@ impl AyPlayer {
             ay_tick_accumulator: 0,
             t_states: 0,
             beeper: Vec::with_capacity(samples_per_frame),
+            mono: vec![0.0; samples_per_frame],
             beeper_accumulator: 0,
             beeper_dc: DcBlocker::new(sample_rate),
             ay_dc: DcBlocker::new(sample_rate),
@@ -286,9 +292,20 @@ impl AyPlayer {
         returned
     }
 
-    /// Fills one frame of interleaved stereo. Call once per `frame()`.
-    pub fn render(&mut self, out: &mut [f32]) {
-        let mut mono = vec![0.0f32; self.samples_per_frame];
+    /// Fill `out` with interleaved stereo frames, returning how many it
+    /// wrote. Call once per [`AyPlayer::frame`].
+    ///
+    /// One `frame()` produces `sample_rate / 50` frames of audio, so a buffer
+    /// shorter than that gets as much as it holds and the rest is dropped;
+    /// a longer one keeps its tail untouched. **Allocates nothing** —
+    /// `tests/engine_allocations.rs` counts, because a player that allocates
+    /// on the audio thread glitches on somebody else's machine and never on
+    /// yours. The same contract [`crate::engine::Engine::render`] keeps.
+    pub fn render(&mut self, out: &mut [f32]) -> usize {
+        // Taken out of `self` so the chip and the DC blocker can be borrowed
+        // mutably alongside it, and put back before returning. The `Vec`
+        // itself is never reallocated, so this moves a header, not data.
+        let mut mono = std::mem::take(&mut self.mono);
         self.chip.end_frame(&mut mono);
 
         // AC-couple the chip before anything is mixed into it.
@@ -339,13 +356,16 @@ impl AyPlayer {
         // rely on it — an AudioWorklet handed a value above 1.0 hard-clips,
         // and this crate should not be the thing that hands it one. With the
         // coupling in place nothing in the 696-file corpus reaches it.
-        for (i, sample) in mono.iter().enumerate() {
-            if let Some(slot) = out.get_mut(i * 2..i * 2 + 2) {
-                let clamped = sample.clamp(-1.0, 1.0);
-                slot[0] = clamped;
-                slot[1] = clamped;
-            }
+        let mut frames = 0;
+        for (slot, sample) in out.as_chunks_mut::<2>().0.iter_mut().zip(mono.iter()) {
+            let clamped = sample.clamp(-1.0, 1.0);
+            slot[0] = clamped;
+            slot[1] = clamped;
+            frames += 1;
         }
+
+        self.mono = mono;
+        frames
     }
 
     /// Calls `address` and runs until it returns or `budget` half T-states
