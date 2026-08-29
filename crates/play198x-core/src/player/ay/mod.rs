@@ -38,7 +38,25 @@ impl AyPlayer {
         }
 
         host.cpu.regs.sp = if song.stack == 0 { 0xC000 } else { song.stack };
-        host.cpu.regs.set_a(0);
+
+        // The format hands the player one 16-bit value for every "common"
+        // register pair -- AF/AF', BC/BC', DE/DE', HL/HL', IX, IY -- split
+        // into two halves: HiReg is the high byte (A, B, D, H, IXH, IYH),
+        // LoReg is the low byte (F, C, E, L, IXL, IYL). F and F' take LoReg
+        // too; the format does not special-case the flags. Verified against
+        // Project AY's own technical documentation and the vgmrips format
+        // wiki, not inferred from field names.
+        let reg_pair = (u16::from(song.hi_reg) << 8) | u16::from(song.lo_reg);
+        host.cpu.regs.af = reg_pair;
+        host.cpu.regs.af_alt = reg_pair;
+        host.cpu.regs.bc = reg_pair;
+        host.cpu.regs.bc_alt = reg_pair;
+        host.cpu.regs.de = reg_pair;
+        host.cpu.regs.de_alt = reg_pair;
+        host.cpu.regs.hl = reg_pair;
+        host.cpu.regs.hl_alt = reg_pair;
+        host.cpu.regs.ix = reg_pair;
+        host.cpu.regs.iy = reg_pair;
 
         let mut player = Self {
             host,

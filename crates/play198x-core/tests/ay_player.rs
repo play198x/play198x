@@ -70,3 +70,32 @@ fn low_memory_is_filled_with_ret() {
     assert_eq!(player.host.mem.read(0x0000), 0xC9);
     assert_eq!(player.host.mem.read(0x00FF), 0xC9);
 }
+
+/// Builds an .ay whose init immediately stores HL to memory and returns, so
+/// the register-pair setup from LoReg/HiReg can be observed without
+/// depending on which register the stub happens to touch first:
+///   init at 0x8000: 22 02 90  LD (0x9002),HL
+///                  C9        RET
+fn ay_with_reg_pair_probe() -> Vec<u8> {
+    let code = vec![0x22, 0x02, 0x90, 0xC9];
+    build_ay(0x8000, 0x8000, 0x8000, &code)
+}
+
+/// The format hands the player one 16-bit value for every "common" register
+/// pair, split as HiReg (high byte) / LoReg (low byte) for all ten of them —
+/// `build_ay` fixes these at 0x22 / 0x11, so HL (and every other pair) must
+/// read 0x2211 by the time init runs.
+#[test]
+fn register_pairs_are_set_from_loreg_and_hireg() {
+    let player = AyPlayer::new(&ay_with_reg_pair_probe(), 0, 48_000).unwrap();
+    assert_eq!(
+        player.host.mem.read(0x9002),
+        0x11,
+        "L (LoReg, the low byte) did not reach HL"
+    );
+    assert_eq!(
+        player.host.mem.read(0x9003),
+        0x22,
+        "H (HiReg, the high byte) did not reach HL"
+    );
+}
