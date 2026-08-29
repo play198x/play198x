@@ -33,6 +33,12 @@ const AY_CLOCK_HZ: u32 = 1_773_400;
 /// `step_with_chip` calls; using 2 here would clock the chip twice too fast.
 const AY_TICK_DIVISOR: u32 = 4;
 
+/// How loud the beeper is against the chip. The Spectrum's speaker is one
+/// bit driven directly, and it is loud; at parity with a full-volume AY
+/// channel a mixed tune clips. Halved, which is a judgement rather than a
+/// measurement — revisit if a real tune sounds wrong.
+const BEEPER_GAIN: f32 = 0.5;
+
 pub struct AyPlayer {
     pub host: SpectrumHost,
     song: Song,
@@ -45,6 +51,20 @@ pub struct AyPlayer {
     /// (see [`AY_TICK_DIVISOR`]). Two of these make one real T-state, so
     /// callers compare against `T_STATES_PER_FRAME * 2`.
     t_states: u32,
+    /// One sample of the speaker bit per output sample, filled by
+    /// `sample_beeper` as the CPU runs and drained by `render`.
+    beeper: Vec<f32>,
+    /// Bresenham-style accumulator for downsampling the beeper from host
+    /// cycles (half T-states) to `samples_per_frame` output samples. Plain
+    /// division (`T_STATES_PER_FRAME / samples_per_frame`) truncates and
+    /// drifts — at 48kHz it produces ~964 samples/frame against a
+    /// 960-sample buffer, dropping the tail and running the beeper
+    /// fractionally fast. Adding `samples_per_frame` every host cycle and
+    /// firing whenever the total reaches `T_STATES_PER_FRAME * 2` emits
+    /// exactly `samples_per_frame` samples every frame with no drift — the
+    /// same technique `emu198x-gi-ay-3-8910` uses internally for its own
+    /// downsampling, so the two signals stay in step.
+    beeper_accumulator: u32,
 }
 
 impl AyPlayer {
@@ -110,6 +130,8 @@ impl AyPlayer {
             samples_per_frame,
             ay_tick_accumulator: 0,
             t_states: 0,
+            beeper: Vec::with_capacity(samples_per_frame),
+            beeper_accumulator: 0,
         };
         let init = if player.song.init == 0 {
             player.song.blocks.first().map_or(0, |b| b.address)
@@ -141,6 +163,16 @@ impl AyPlayer {
     pub fn render(&mut self, out: &mut [f32]) {
         let mut mono = vec![0.0f32; self.samples_per_frame];
         self.chip.end_frame(&mut mono);
+
+        // A tune that never wrote the speaker port has no beeper signal, and
+        // must not be given a DC offset by the -1.0 resting level.
+        if self.host.speaker_written {
+            for (sample, beep) in mono.iter_mut().zip(self.beeper.iter()) {
+                *sample += BEEPER_GAIN * beep;
+            }
+        }
+        self.beeper.clear();
+
         for (i, sample) in mono.iter().enumerate() {
             if let Some(slot) = out.get_mut(i * 2..i * 2 + 2) {
                 slot[0] = *sample;
@@ -192,6 +224,26 @@ impl AyPlayer {
         if self.ay_tick_accumulator >= AY_TICK_DIVISOR {
             self.ay_tick_accumulator = 0;
             self.chip.tick();
+        }
+        self.sample_beeper();
+    }
+
+    /// Called from `step_with_chip`, once per host cycle (one half T-state).
+    /// Downsamples the speaker bit to `samples_per_frame` output samples
+    /// with a Bresenham-style accumulator rather than a fixed T-state
+    /// divisor: `step_with_chip` runs `T_STATES_PER_FRAME * 2` times per
+    /// frame (see `t_states`'s doc), so adding `samples_per_frame` every
+    /// call and firing whenever the running total reaches that many host
+    /// cycles emits exactly `samples_per_frame` samples a frame, every
+    /// frame, with no truncation and no drift.
+    fn sample_beeper(&mut self) {
+        self.beeper_accumulator += self.samples_per_frame as u32;
+        if self.beeper_accumulator >= T_STATES_PER_FRAME * 2 {
+            self.beeper_accumulator -= T_STATES_PER_FRAME * 2;
+            let level = if self.host.speaker { 1.0 } else { -1.0 };
+            if self.beeper.len() < self.samples_per_frame {
+                self.beeper.push(level);
+            }
         }
     }
 }

@@ -141,3 +141,35 @@ fn a_tune_that_programs_the_chip_makes_a_noise() {
         "the chip was programmed but rendered silence (peak {peak})"
     );
 }
+
+/// A tune that toggles the speaker and nothing else must be audible.
+///   interrupt: 30 iterations of: OUT (0xFE),A with bit 4 alternating,
+///              separated by a delay, then RET
+#[test]
+fn a_beeper_only_tune_is_audible() {
+    let mut code = vec![0u8; 0x40];
+    code[0x10..0x20].copy_from_slice(&[
+        0x06, 0x1E, // LD B,30
+        0x3E, 0x10, // LD A,0x10   (speaker high)
+        0xD3, 0xFE, // OUT (0xFE),A
+        0x00, 0x00, // NOP NOP
+        0x3E, 0x00, // LD A,0x00   (speaker low)
+        0xD3, 0xFE, // OUT (0xFE),A
+        0x10, 0xF4, // DJNZ back to the first LD A
+        0xC9, 0x00, // RET
+    ]);
+
+    let bytes = build_ay(0x8000, 0x8010, 0x8000, &code);
+    let mut player = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+
+    let mut peak = 0.0f32;
+    let mut out = vec![0.0f32; 48_000 / 50 * 2];
+    for _ in 0..10 {
+        player.frame();
+        player.render(&mut out);
+        for sample in &out {
+            peak = peak.max(sample.abs());
+        }
+    }
+    assert!(peak > 0.01, "a beeper tune rendered silence (peak {peak})");
+}
