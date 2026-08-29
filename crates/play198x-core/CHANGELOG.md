@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/play198x/play198x/compare/play198x-core-v0.2.0...play198x-core-v0.3.0) - 2026-08-29
+
+### Fixed
+
+- *(ay)* [**breaking**] stop the frame running a tune past its own return
+
 ### Changed
 
 - **Breaking: the `ay` host is a 128K Spectrum's memory, not a flat 64 KB.**

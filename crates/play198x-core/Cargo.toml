@@ -6,7 +6,7 @@ name = "play198x-core"
 # emu198x/emu198x#1214. Stated explicitly rather than left to cargo default,
 # so that inverting it has to be a deliberate edit rather than an omission.
 publish = true
-version = "0.2.0"
+version = "0.3.0"
 description = "Open, identify and render retro media — Spectrum, C64 and Amiga images, ProTracker modules, and Spectrum .ay tunes (playback behind the `ay` feature)."
 keywords = ["retro", "amiga", "protracker", "c64", "spectrum"]
 categories = ["multimedia", "emulators"]
