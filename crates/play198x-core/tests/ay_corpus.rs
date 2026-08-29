@@ -7,9 +7,10 @@
 //! first time any of it meets real files, and it exists to answer two
 //! separate questions: how much of the archive plays at all, and how loud
 //! the mix gets when it does (the AY chip's three channels already sum to
-//! roughly full scale before the beeper is added, and there is no clipping
-//! clamp yet — a decision deferred to the whole-branch review until this
-//! sweep supplied the real numbers to decide it with).
+//! roughly full scale before the beeper is added, so the headroom left for
+//! the beeper on top is a measurement and not an assumption; `render`'s
+//! clamp is a backstop behind that, and the figures below are taken before
+//! it so they can see past it).
 //!
 //! This sweep runs two passes over the same archive. The first plays only
 //! song 0 of each file (`AyPlayer::new(&bytes, 0, ...)`) — cheap, and kept
@@ -126,6 +127,47 @@ impl Failures {
 /// sit near full scale, how many are already over it", not a fine curve.
 /// `silent` doubles as this sweep's audible/silent split: a tune whose peak
 /// never clears [`AUDIBLE_THRESHOLD`] lands here and nowhere else.
+/// How much of a tune's playback its interrupt routine failed to return in.
+///
+/// Counted in frames, not as a per-tune flag. A flag cannot tell three
+/// overrunning frames of 250 from 235 of 250, and the difference between
+/// those two is exactly the shape a host bug takes: a tune that overran
+/// occasionally starts overrunning permanently, while the flag reports both
+/// states identically and the corpus total does not move. That is how a
+/// change that set five tunes running loose for most of every frame passed
+/// a sweep whose overrun figure was unchanged at 128/1536.
+///
+/// So the sweep reports the size of the problem as well as its incidence:
+/// how many tunes overran at all, how many overran throughout, the total
+/// across the corpus, and the worst single tune.
+#[derive(Default, Debug)]
+struct Overruns {
+    /// Tunes whose routine overran at least one frame.
+    tunes: u32,
+    /// Tunes whose routine overran every frame sampled — a tune whose play
+    /// routine simply never returns, rather than one that occasionally
+    /// takes too long.
+    always: u32,
+    /// Overrunning frames, summed across every tune.
+    frames: u64,
+    /// The most overrunning frames any single tune had.
+    worst: u32,
+}
+
+impl Overruns {
+    fn record(&mut self, overran: u32) {
+        if overran == 0 {
+            return;
+        }
+        self.tunes += 1;
+        if overran >= FRAMES {
+            self.always += 1;
+        }
+        self.frames += u64::from(overran);
+        self.worst = self.worst.max(overran);
+    }
+}
+
 #[derive(Default, Debug)]
 struct PeakBuckets {
     /// <= AUDIBLE_THRESHOLD: no audible output in the frames sampled.
@@ -181,6 +223,10 @@ struct PagingTune {
     values: u8,
     /// Pre-clamp peak, the same figure [`PeakBuckets`] buckets.
     peak: f32,
+    /// Frames of [`FRAMES`] whose interrupt routine overran. Listed per
+    /// tune because this is the group whose memory model changed, so it is
+    /// the group where a routine that stops returning would show first.
+    overran: u32,
     /// Whether this tune also read the AY's register-read port, so the
     /// overlap between the paging cohort and the read-back cohort is
     /// visible per tune rather than inferred from two equal counts.
@@ -196,6 +242,8 @@ struct AyReadTune {
     /// the unattached bus; see [`AyPlayer::ay_reads_non_ff`].
     non_ff: u32,
     peak: f32,
+    /// As [`PagingTune::overran`].
+    overran: u32,
     /// Whether this tune also pages memory. The two cohorts are the same
     /// size and are not the same tunes, which a pair of counts alone would
     /// read as one group.
@@ -224,11 +272,12 @@ fn the_local_archive_plays() {
     let mut ay_only = 0u32;
     let mut both = 0u32;
     let mut neither = 0u32;
-    // Tunes whose interrupt routine overran its one-frame budget at least
-    // once. `frame()` returns that fact rather than discarding it, and this
-    // is the only place across the whole archive that can say how common it
-    // is — a stub player raises no `INT`, so a routine waiting on one spins.
-    let mut interrupt_overran = 0u32;
+    // How far, not just whether, each tune's interrupt routine overran its
+    // one-frame budget. `frame()` returns that fact per frame rather than
+    // discarding it, and this is the only place across the whole archive
+    // that can say how much of the corpus it costs — a stub player raises
+    // no `INT`, so a routine waiting on one spins. See [`Overruns`].
+    let mut overruns = Overruns::default();
     // The largest pre-clamp sample anywhere in the archive, so the headroom
     // margin is a number rather than a bucket.
     let mut max_peak = 0.0f32;
@@ -245,9 +294,9 @@ fn the_local_archive_plays() {
             Err(err) => failures.record(&err),
             Ok(mut player) => {
                 parsed += 1;
-                let mut overran = false;
+                let mut overran = 0u32;
                 for _ in 0..FRAMES {
-                    overran |= !player.frame();
+                    overran += u32::from(!player.frame());
                     player.render(&mut out);
                 }
                 // Taken before `render`'s clamp, not from `out`. A peak
@@ -259,9 +308,7 @@ fn the_local_archive_plays() {
                 let peak = player.peak_before_clamp();
                 max_peak = max_peak.max(peak);
                 peaks.record(peak);
-                if overran {
-                    interrupt_overran += 1;
-                }
+                overruns.record(overran);
                 match (player.host.speaker_written, player.host.ay_written) {
                     (true, true) => both += 1,
                     (true, false) => beeper_only += 1,
@@ -290,22 +337,49 @@ fn the_local_archive_plays() {
     println!(
         "sound source: beeper-only {beeper_only}  ay-only {ay_only}  both {both}  neither {neither}"
     );
-    println!("interrupt routine overran its frame at least once: {interrupt_overran}/{parsed}");
+    println!(
+        "interrupt overruns: {}/{parsed} tunes overran at least one frame, {} overran all {FRAMES}, {} overrunning frames in total, worst tune {}/{FRAMES}",
+        overruns.tunes, overruns.always, overruns.frames, overruns.worst
+    );
 
     assert!(parsed > 0, "no .ay files were found under {ARCHIVE}");
 
     // `render` clamps to [-1, 1] as a backstop; AC-coupling the chip's
     // output is what actually keeps the mix inside range. Measured
-    // pre-clamp on 2026-08-29, the backstop engages on exactly one file, at
-    // a peak of 1.010 — a hair over, not a mix without headroom.
+    // pre-clamp on 2026-08-29, the backstop does not engage anywhere in the
+    // archive: the loudest tunes sit exactly on 1.0, and none goes past it.
     //
-    // So the bar is `clipping`, not `over_one`. Asserting nothing exceeds
-    // full scale would be false, and asserting it against post-clamp output
-    // would be true no matter how bad the mix got.
+    // The bar stays `clipping` rather than tightening to `over_one`. A tune
+    // crossing full scale by a hair is the backstop doing its job, and a
+    // sweep that failed on it would be reporting a mix that is loud rather
+    // than a mix that is broken. Asserting it against post-clamp output
+    // would be true no matter how bad the mix got, which is why this is
+    // measured before the clamp at all.
     assert_eq!(
         peaks.clipping, 0,
         "{} of {parsed} files drive the mix past 1.5 before the clamp",
         peaks.clipping
+    );
+
+    // A host bug does not have to stop a tune parsing or make it silent to
+    // be a host bug. The shape it takes instead is a play routine that used
+    // to come back and now does not: the tune still renders, still sounds
+    // roughly like itself, and spends most of every frame executing
+    // something nobody wrote. Counted in frames rather than tunes because
+    // the tune count cannot see it — a routine overrunning 3 frames of 250
+    // and one overrunning 235 are the same tune either way, and a change
+    // that put five tunes into permanent overrun once passed this sweep
+    // with the tune count unmoved.
+    //
+    // Measured baseline: 2,701 overrunning frames across 553 tunes, of a
+    // possible 138,250. The bar at 8,000 leaves room for roughly twenty
+    // more tunes whose routine never returns at all (250 frames each)
+    // before it trips, while a bug that sets hundreds of tunes running
+    // loose lands in the tens of thousands.
+    assert!(
+        overruns.frames < 8_000,
+        "interrupt routines overran {} frames, against a measured baseline of 2,701",
+        overruns.frames
     );
 
     // `audible / parsed` cannot catch a parser regression on its own: break
@@ -406,7 +480,7 @@ fn the_local_archive_plays() {
     let mut all_ay_only = 0u32;
     let mut all_both = 0u32;
     let mut all_neither = 0u32;
-    let mut all_interrupt_overran = 0u32;
+    let mut all_overruns = Overruns::default();
     let mut all_max_peak = 0.0f32;
     let mut total_songs = 0u32;
     let mut multi_song_files = 0u32;
@@ -467,17 +541,15 @@ fn the_local_archive_plays() {
                         song0_ok = true;
                     }
                     all_parsed += 1;
-                    let mut overran = false;
+                    let mut overran = 0u32;
                     for _ in 0..FRAMES {
-                        overran |= !player.frame();
+                        overran += u32::from(!player.frame());
                         player.render(&mut out);
                     }
                     let peak = player.peak_before_clamp();
                     all_max_peak = all_max_peak.max(peak);
                     all_peaks.record(peak);
-                    if overran {
-                        all_interrupt_overran += 1;
-                    }
+                    all_overruns.record(overran);
                     match (player.host.speaker_written, player.host.ay_written) {
                         (true, true) => all_both += 1,
                         (true, false) => all_beeper_only += 1,
@@ -497,6 +569,7 @@ fn the_local_archive_plays() {
                             song: song_idx,
                             values: player.host.paging_values_seen,
                             peak,
+                            overran,
                             reads_ay: player.ay_read,
                         });
                     }
@@ -514,6 +587,7 @@ fn the_local_archive_plays() {
                             song: song_idx,
                             non_ff: player.ay_reads_non_ff,
                             peak,
+                            overran,
                             pages: player.host.paging_written,
                         });
                     }
@@ -545,7 +619,8 @@ fn the_local_archive_plays() {
         "sound source: beeper-only {all_beeper_only}  ay-only {all_ay_only}  both {all_both}  neither {all_neither}"
     );
     println!(
-        "interrupt routine overran its frame at least once: {all_interrupt_overran}/{all_parsed}"
+        "interrupt overruns: {}/{all_parsed} tunes overran at least one frame, {} overran all {FRAMES}, {} overrunning frames in total, worst tune {}/{FRAMES}",
+        all_overruns.tunes, all_overruns.always, all_overruns.frames, all_overruns.worst
     );
 
     println!();
@@ -609,11 +684,12 @@ fn the_local_archive_plays() {
     );
     for tune in &paging_cohort {
         println!(
-            "  {:<44} song {:<3} 0x7FFD bits 0x{:02X}  peak {:.4}{}",
+            "  {:<44} song {:<3} 0x7FFD bits 0x{:02X}  peak {:.4}  overran {:>3}/{FRAMES}{}",
             tune.name,
             tune.song,
             tune.values,
             tune.peak,
+            tune.overran,
             if tune.reads_ay {
                 "  reads the AY back"
             } else {
@@ -641,11 +717,12 @@ fn the_local_archive_plays() {
     );
     for tune in &ay_read_cohort {
         println!(
-            "  {:<44} song {:<3} non-0xFF reads {:<6} peak {:.4}{}",
+            "  {:<44} song {:<3} non-0xFF reads {:<6} peak {:.4}  overran {:>3}/{FRAMES}{}",
             tune.name,
             tune.song,
             tune.non_ff,
             tune.peak,
+            tune.overran,
             if tune.pages { "  pages memory" } else { "" }
         );
     }
