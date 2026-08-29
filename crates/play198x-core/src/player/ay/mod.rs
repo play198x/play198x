@@ -157,6 +157,16 @@ pub struct AyPlayer {
     /// call, and each call is one Rise-or-Fall half-cycle of the Z80 core
     /// (see [`AY_TICK_DIVISOR`]). Two of these make one real T-state, so
     /// callers compare against `T_STATES_PER_FRAME * 2`.
+    ///
+    /// Counted with wrapping arithmetic, and read only as a difference. At
+    /// 7,090,800 half T-states a second a `u32` runs out after 10 minutes 6
+    /// seconds, which is an ordinary length for a tune; `+=` would panic
+    /// there under the overflow checks the default dev profile turns on, and
+    /// a panic reachable from the audio path is against the posture the
+    /// workspace lints spell out. Wrapping is not a workaround here but the
+    /// right reading: `frame()` compares `t_states - before` across a few
+    /// thousand ticks, and modular subtraction gives the true difference
+    /// whether or not the counter wrapped in between.
     t_states: u32,
     /// One sample of the speaker bit per output sample, filled by
     /// `sample_beeper` as the CPU runs and drained by `render`.
@@ -415,7 +425,7 @@ impl AyPlayer {
     /// note in the wrong place.
     fn step_with_chip(&mut self) {
         self.host.step();
-        self.t_states += 1;
+        self.t_states = self.t_states.wrapping_add(1);
         if let Some((register, value)) = self.host.ay_write.take() {
             self.chip.select_register(register);
             self.chip.write_data(value);
