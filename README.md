@@ -16,9 +16,15 @@ timing walk are all in.
 [play198x.github.io](https://play198x.github.io) is a page that *is* the
 player: drop a file on it and it draws or plays in the browser. It reads ZX
 Spectrum SCREEN$, Commodore 64 Koala Paint and Art Studio, Amiga IFF ILBM and
-ProTracker MOD. SID and AY chiptunes need chip emulation that lives in Emu198x,
-whose chip crates are not published yet
-([emu198x/emu198x#1214](https://github.com/emu198x/emu198x/issues/1214)).
+ProTracker MOD.
+
+ZX Spectrum `.ay` chiptunes play too, behind `play198x-core`'s optional `ay`
+feature: the tune's own Z80 code runs against Emu198x's published CPU and AY
+crates, on a host this crate supplies, and **no ROM is involved**. The feature
+is off by default, so a consumer decoding a SCREEN$ acquires no Z80 to do it.
+The web player does not expose it yet — four more crates enter the `.wasm` the
+page fetches, and that cost should be measured before it does. SID is the next
+slice.
 
 There is no desktop shell yet. It comes after the web one and is deliberately
 thin, the same way: anything a shell can do is an operation the core exposes,
