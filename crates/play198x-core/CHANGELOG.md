@@ -54,12 +54,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   make was the runaway. The remainder of a frame now advances the chip, the
   beeper and the clock without the CPU, which is what the machine does while
   the player waits for its next interrupt. Across the archive this takes tunes
-  overrunning their frame budget from 128 to 86 and overrunning frames from
-  17,599 to 13,065, and makes 8 subtunes audible that rendered silence before.
+  overrunning their frame budget from 128 to 85 and overrunning frames from
+  17,599 to 14,085. Eight subtunes that rendered silence now play; two that
+  appeared to play now render silence, and both are the fault rather than a
+  loss — Ghosts'n'Goblins and Target Renegade song 4 were making their sound
+  by executing their own data, and both files' remaining subtunes gained.
 - **the sentinel return address is recognised at an instruction boundary.**
-  A bare `PC == 0xFFFF` check can match part-way through an instruction whose
-  operand fetches pass through that address, which now matters because the CPU
-  is left where the check stopped it. No tune in the archive trips it.
+  A bare `PC == 0xFFFF` check matches part-way through an instruction whose
+  operand fetches pass through that address, which matters now that the CPU is
+  left where the check stopped it. The boundary is an edge on
+  `Z80::instructions_retired`, not `Z80::instruction_complete`, which is a
+  level that stays true throughout the following opcode fetch and so still
+  matches mid-instruction. `call` also runs on to the end of the instruction
+  in flight when its budget expires, so a routine that never returns no longer
+  leaves the core part-way through one for the next frame to resume.
+- **frame 0 no longer carries the init routine's output.** `new()` runs init
+  through the whole host, so the chip had been accumulating output and the
+  beeper buffer filling before the first frame was asked for — and since the
+  two accumulate at different rates, the first rendered frame was not merely
+  late but internally skewed. Both are drained after init, and the beeper's DC
+  blocker reset.
+- **a `sample_rate` of zero no longer produces infinities.** It is floored at
+  1 Hz, as `Engine::new` already does, and the frame's sample count at 1,
+  because the chip's downsampler takes it as a divisor.
+- **`probe::identify` and the `.ay` parser agree on how short is too short.**
+  An eight-byte `ZXAYEMUL` file identified as `Confidence::Certain` and then
+  failed to parse as `NotAnAyFile`. Both now use `probe::AY_MIN_LEN`, which is
+  declared in the ungated module so the gated parser can share it.
 
 ## [0.2.0](https://github.com/play198x/play198x/compare/play198x-core-v0.1.3...play198x-core-v0.2.0) - 2026-08-29
 
