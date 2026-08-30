@@ -257,8 +257,7 @@ fn synthetic_module_panned_left() -> Vec<u8> {
 
 #[wasm_bindgen_test]
 fn render_puts_a_hard_left_note_in_the_left_buffer_only() {
-    let mut player =
-        play198x_web::Player::new(&synthetic_module_panned_left(), 0, 48_000).unwrap();
+    let mut player = play198x_web::Player::new(&synthetic_module_panned_left(), 0, 48_000).unwrap();
     let quantum = play198x_web::Player::render_quantum();
     player.render(quantum);
 
