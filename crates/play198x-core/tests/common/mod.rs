@@ -285,6 +285,41 @@ pub fn build_ay_songs(
     block_address: u16,
     code: &[u8],
 ) -> Vec<u8> {
+    let songs: Vec<AySongSpec> = songs
+        .iter()
+        .map(|&(hi_reg, lo_reg)| AySongSpec {
+            hi_reg,
+            lo_reg,
+            length_frames: 500,
+            fade_frames: 50,
+        })
+        .collect();
+    build_ay_songs_with(&songs, init, interrupt, block_address, code)
+}
+
+/// One song's entry in the song table.
+pub struct AySongSpec {
+    pub hi_reg: u8,
+    pub lo_reg: u8,
+    pub length_frames: u16,
+    pub fade_frames: u16,
+}
+
+/// As [`build_ay_songs`], with each song's declared length and fade stated.
+///
+/// Holds the byte layout; [`build_ay_songs`] delegates here with the defaults
+/// its doc names, so there is one description of the format rather than two
+/// free to drift. A test that needs songs of *different* lengths wants this
+/// one: with every song the same length, a test cannot tell "reports song i's
+/// length" from "reports song 0's length", which is the bug that made
+/// per-song metadata necessary in the first place.
+pub fn build_ay_songs_with(
+    songs: &[AySongSpec],
+    init: u16,
+    interrupt: u16,
+    block_address: u16,
+    code: &[u8],
+) -> Vec<u8> {
     assert!(
         !songs.is_empty() && songs.len() <= 256,
         "an .ay file carries 1..=256 songs"
@@ -335,13 +370,13 @@ pub fn build_ay_songs(
     let mut block_ptr_at = Vec::new();
     let mut block_at = Vec::new();
 
-    for &(hi_reg, lo_reg) in songs {
+    for song in songs {
         data_at.push(b.len());
         b.extend_from_slice(&[0, 1, 2, 3]); // AChan..Noise (data+0)
-        b.extend_from_slice(&500u16.to_be_bytes()); // SongLength (data+4)
-        b.extend_from_slice(&50u16.to_be_bytes()); // FadeLength (data+6)
-        b.push(hi_reg); // HiReg (data+8)
-        b.push(lo_reg); // LoReg (data+9)
+        b.extend_from_slice(&song.length_frames.to_be_bytes()); // SongLength (data+4)
+        b.extend_from_slice(&song.fade_frames.to_be_bytes()); // FadeLength (data+6)
+        b.push(song.hi_reg); // HiReg (data+8)
+        b.push(song.lo_reg); // LoReg (data+9)
         points_ptr_at.push(b.len()); // PPoints (data+10)
         b.extend_from_slice(&0i16.to_be_bytes());
         addrs_ptr_at.push(b.len()); // PAddresses (data+12)

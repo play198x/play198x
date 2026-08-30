@@ -118,6 +118,20 @@ pub struct ImageMeta {
 /// produces rather than leaving it to guesswork.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct AySong {
+    /// The song's name from its entry in the file's song table.
+    pub name: String,
+    /// `SongLength` in 50Hz frames — how long a player plays it before
+    /// fading. Frames, not milliseconds, because that is what the file says;
+    /// an interface dividing by 50 is doing the conversion knowingly.
+    pub length_frames: u16,
+    /// `FadeLength` in 50Hz frames, following [`Self::length_frames`].
+    pub fade_frames: u16,
+}
+
+/// What a `.ay` file says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AyMeta {
     /// The first song's name, standing in for a title the format has no
     /// file-level field for. Empty when the file carries no songs.
@@ -126,12 +140,14 @@ pub struct AyMeta {
     pub author: String,
     /// `PMisc`, Latin-1, from the file header.
     pub misc: String,
-    /// Every song's name, in file order — the full tune list a player would
-    /// offer, not just the one [`Self::title`] is drawn from.
-    pub songs: Vec<String>,
-    /// The first song's `SongLength` in 50Hz frames — how long a player
-    /// plays it before fading. Zero when the file carries no songs.
-    pub length_frames: u16,
+    /// Every song, in file order — the full tune list a player would offer,
+    /// not just the one [`Self::title`] is drawn from.
+    ///
+    /// Each carries its own length, rather than the file carrying one: an
+    /// interface that lets a visitor choose a song needs that song's
+    /// duration, and a single file-level figure is song 0's answer given to
+    /// every question.
+    pub songs: Vec<AySong>,
 }
 
 /// Describe a module.
@@ -197,8 +213,15 @@ pub fn ay_meta(file: &crate::player::ay::format::AyFile) -> AyMeta {
         title: first.map(|song| song.name.clone()).unwrap_or_default(),
         author: file.author.clone(),
         misc: file.misc.clone(),
-        songs: file.songs.iter().map(|song| song.name.clone()).collect(),
-        length_frames: first.map_or(0, |song| song.length_frames),
+        songs: file
+            .songs
+            .iter()
+            .map(|song| AySong {
+                name: song.name.clone(),
+                length_frames: song.length_frames,
+                fade_frames: song.fade_frames,
+            })
+            .collect(),
     }
 }
 

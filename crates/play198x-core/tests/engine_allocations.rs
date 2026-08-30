@@ -138,7 +138,7 @@ fn ay_render_allocates_nothing() {
     for call in 1..=3 {
         let before = ALLOCATIONS.load(Ordering::Relaxed);
         player.frame();
-        let frames = player.render(&mut buf);
+        let frames = player.render_frame(&mut buf);
         let after = ALLOCATIONS.load(Ordering::Relaxed);
         assert_eq!(frames, 44_100 / 50);
         assert_eq!(

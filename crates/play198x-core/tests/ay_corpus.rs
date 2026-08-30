@@ -301,7 +301,7 @@ fn the_local_archive_plays() {
                 let mut overran = 0u32;
                 for _ in 0..FRAMES {
                     overran += u32::from(!player.frame());
-                    player.render(&mut out);
+                    player.render_frame(&mut out);
                 }
                 // Taken before `render`'s clamp, not from `out`. A peak
                 // read back from the rendered output is at most 1.0 by
@@ -543,7 +543,7 @@ fn the_local_archive_plays() {
                     let mut overran = 0u32;
                     for _ in 0..FRAMES {
                         overran += u32::from(!player.frame());
-                        player.render(&mut out);
+                        player.render_frame(&mut out);
                     }
                     let peak = player.peak_before_clamp();
                     all_max_peak = all_max_peak.max(peak);

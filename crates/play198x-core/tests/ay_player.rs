@@ -176,7 +176,7 @@ fn a_tune_that_programs_the_chip_makes_a_noise() {
     let mut out = vec![0.0f32; 48_000 / 50 * 2];
     for _ in 0..25 {
         player.frame();
-        player.render(&mut out);
+        player.render_frame(&mut out);
         for sample in &out {
             peak = peak.max(sample.abs());
         }
@@ -206,7 +206,7 @@ fn the_chip_output_is_ac_coupled() {
     // about one frame, so ten is well clear.
     for _ in 0..10 {
         player.frame();
-        player.render(&mut out);
+        player.render_frame(&mut out);
     }
 
     let mut sum = 0.0f64;
@@ -214,7 +214,7 @@ fn the_chip_output_is_ac_coupled() {
     let mut peak = 0.0f32;
     for _ in 0..25 {
         player.frame();
-        player.render(&mut out);
+        player.render_frame(&mut out);
         for sample in &out {
             sum += f64::from(*sample);
             count += 1;
@@ -257,7 +257,7 @@ fn a_beeper_only_tune_is_audible() {
     let mut out = vec![0.0f32; 48_000 / 50 * 2];
     for _ in 0..10 {
         player.frame();
-        player.render(&mut out);
+        player.render_frame(&mut out);
         for sample in &out {
             peak = peak.max(sample.abs());
         }
@@ -302,7 +302,7 @@ fn a_speaker_write_once_tune_settles_to_silence() {
 
     // Frame 0 contains the one-time write: a real click, must be audible.
     player.frame();
-    player.render(&mut out);
+    player.render_frame(&mut out);
     let click_peak = out
         .iter()
         .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
@@ -316,7 +316,7 @@ fn a_speaker_write_once_tune_settles_to_silence() {
     // the exact sample count the filter takes would make this test as
     // fragile as the bug it is guarding against.
     player.frame();
-    player.render(&mut out);
+    player.render_frame(&mut out);
 
     // By two frames after the click and onward, nothing has touched the
     // port again: a sticky DC offset would keep every one of these frames
@@ -325,7 +325,7 @@ fn a_speaker_write_once_tune_settles_to_silence() {
     let mut settled_peak = 0.0f32;
     for _ in 0..8 {
         player.frame();
-        player.render(&mut out);
+        player.render_frame(&mut out);
         for sample in &out {
             settled_peak = settled_peak.max(sample.abs());
         }
@@ -852,7 +852,7 @@ fn a_zero_sample_rate_neither_panics_nor_diverges() {
     let mut out = vec![0.0f32; 64];
     for frame in 1..=40 {
         player.frame();
-        player.render(&mut out);
+        player.render_frame(&mut out);
         assert!(
             player.peak_before_clamp().is_finite(),
             "frame {frame}: a zero sample rate diverged to {}",
@@ -893,5 +893,38 @@ fn the_first_rendered_frame_does_not_carry_inits_output() {
     assert!(
         player.buffered_beeper_samples() == 0,
         "init's beeper samples were carried into frame 0"
+    );
+}
+
+/// The path the browser actually takes.
+///
+/// A worklet asks for 128 frames; this player only ever produces whole 50Hz
+/// frames of 960. Driving the player directly, as every other test here does,
+/// never exercises that mismatch — so this drives it the way the shell will,
+/// through the pump, and asserts the tune is still audible on the far side.
+#[test]
+fn the_pump_serves_worklet_quanta_from_this_players_frames() {
+    let bytes = ay_that_programs_channel_a();
+    let pump_source = AyPlayer::new(&bytes, 0, 48_000).unwrap();
+    let mut pump = play198x_core::player::pump::FramePump::new(pump_source);
+
+    let mut peak = 0.0f32;
+    let mut out = vec![0.0f32; 128 * 2];
+    // 200 quanta is 25,600 frames — a little over 26 of the player's own
+    // frames, so the seam is crossed many times rather than once.
+    for _ in 0..200 {
+        assert_eq!(
+            play198x_core::player::Player::render(&mut pump, &mut out),
+            128,
+            "the pump must fill a whole quantum"
+        );
+        for sample in &out {
+            peak = peak.max(sample.abs());
+        }
+    }
+
+    assert!(
+        peak > 0.01,
+        "the chip was programmed but the pump rendered silence (peak {peak})"
     );
 }
