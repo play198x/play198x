@@ -29,7 +29,6 @@ pub mod probe;
 
 #[cfg(feature = "ay")]
 pub mod host;
-#[cfg(feature = "ay")]
 pub mod player;
 
 /// Everything that can go wrong, from opening a path to decoding an entry.
