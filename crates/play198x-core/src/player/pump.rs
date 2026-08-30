@@ -48,6 +48,17 @@ pub trait FrameSource {
     /// special-cased. Answering with a constant is fine; being *asked* every
     /// time is what keeps the varying case ordinary.
     fn samples_per_frame(&self) -> usize;
+
+    /// Which subtune is playing.
+    ///
+    /// Defaults to 0, which is the whole answer for a format that carries one
+    /// tune per file — a register dump has no subtunes to choose between.
+    /// `.ay` and SID override it. It lives here rather than on the pump
+    /// because the subtune is a property of what is playing, not of the
+    /// buffering in front of it.
+    fn song(&self) -> usize {
+        0
+    }
 }
 
 /// Serves any request from a [`FrameSource`], a frame at a time.
@@ -140,7 +151,7 @@ impl<S: FrameSource> Player for FramePump<S> {
 
     fn position(&self) -> Position {
         Position::Frame {
-            song: 0,
+            song: self.source.song(),
             frame: self.frames_run,
         }
     }

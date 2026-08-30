@@ -216,6 +216,10 @@ impl DcBlocker {
 pub struct AyPlayer {
     pub host: SpectrumHost,
     song: Song,
+    /// The index `new` was given, so the player can say which subtune of
+    /// the file it is playing — the `Song` above is the entry itself and
+    /// does not carry its own position in the table.
+    song_index: usize,
     frames_played: u32,
     samples_per_frame: usize,
     ay_tick_accumulator: u32,
@@ -294,6 +298,10 @@ impl AyPlayer {
     /// When the bytes are not an `.ay` file, or `song` is out of range.
     pub fn new(bytes: &[u8], song: usize, sample_rate: u32) -> Result<Self, AyError> {
         let file: AyFile = format::parse(bytes)?;
+        // Kept before `song` is shadowed by the entry it names: the entry
+        // does not carry its own index, and a player must be able to say
+        // which subtune it is.
+        let song_index = song;
         let song = file.songs.get(song).cloned().ok_or(AyError::NoSuchSong)?;
 
         let mut host = SpectrumHost::new();
@@ -356,6 +364,7 @@ impl AyPlayer {
         let mut player = Self {
             host,
             song,
+            song_index,
             frames_played: 0,
             samples_per_frame,
             ay_tick_accumulator: 0,
@@ -754,5 +763,9 @@ impl crate::player::pump::FrameSource for AyPlayer {
     /// for the formats where it does vary.
     fn samples_per_frame(&self) -> usize {
         self.samples_per_frame
+    }
+
+    fn song(&self) -> usize {
+        self.song_index
     }
 }

@@ -8,12 +8,12 @@
 use play198x_core::probe::{Confidence, Format};
 use wasm_bindgen::prelude::*;
 
-/// Frames [`ModulePlayer::render`] fills per call.
+/// Frames [`Player::render`] fills per call.
 ///
 /// The Web Audio render quantum: fixed by the Web Audio spec at 128 samples,
 /// and confirmed by the spike this crate's plan cites (128 samples at 48 kHz,
 /// called roughly every 2.7 ms, 0 glitches across 45,750 callbacks).
-/// [`ModulePlayer`]'s per-channel buffers are sized to exactly this many
+/// [`Player`]'s per-channel buffers are sized to exactly this many
 /// frames, once, at construction, and nothing afterwards grows them — which
 /// is what lets a caller build a `Float32Array` view over them and reuse
 /// that view across calls instead of re-acquiring it every render.
@@ -274,7 +274,7 @@ impl DecodedImage {
 /// What a module says about itself: its title, its shape, every sample name,
 /// and how long it plays.
 ///
-/// Built from bytes rather than from a [`ModulePlayer`], and that is the
+/// Built from bytes rather than from a [`Player`], and that is the
 /// point. A player is constructed on the audio thread, inside the worklet,
 /// after a visitor has asked for sound; a player's info panel needs to say
 /// what the file is *before* that. So this reads the module the same way
@@ -302,7 +302,7 @@ const META_SAMPLE_RATE: u32 = 48_000;
 /// # Errors
 ///
 /// When the bytes are not a 4-channel ProTracker module — carrying the core's
-/// own message unchanged, as [`ModulePlayer::new`] does.
+/// own message unchanged, as [`Player::new`] does.
 #[wasm_bindgen(js_name = moduleMeta)]
 pub fn module_meta(bytes: &[u8]) -> Result<ModuleMeta, JsError> {
     let module =
@@ -503,7 +503,37 @@ impl Container {
     }
 }
 
-/// A playing ProTracker module, wrapped for an `AudioWorkletProcessor`.
+/// Whichever player the dropped file called for.
+///
+/// An enum rather than a boxed trait object, because not every operation is
+/// shared: a module can be seeked to an order and a `.ay` cannot, and the
+/// enum is what lets [`Player::seek_order`] say so instead of silently doing
+/// nothing. Everything that *is* shared goes through
+/// [`play198x_core::player::Player`].
+///
+/// Both variants are boxed, so the enum is a pointer whichever is playing and
+/// neither one's size decides the other's. `Engine` measures at least 2,552
+/// bytes inline while the `.ay` player keeps its Spectrum RAM on the heap
+/// already, so leaving either unboxed makes every player pay for the larger —
+/// and which one that is has flipped once during this design, which is the
+/// argument for not depending on the answer. Both allocations happen once, at
+/// construction, off the audio thread.
+enum Inner {
+    Module(Box<play198x_core::engine::Engine>),
+    Ay(Box<play198x_core::player::pump::FramePump<play198x_core::player::ay::AyPlayer>>),
+}
+
+impl Inner {
+    /// The shared half of the two, as the core's trait.
+    fn as_player(&mut self) -> &mut dyn play198x_core::player::Player {
+        match self {
+            Inner::Module(engine) => engine.as_mut(),
+            Inner::Ay(pump) => pump.as_mut(),
+        }
+    }
+}
+
+/// A playing tune, wrapped for an `AudioWorkletProcessor`.
 ///
 /// The worklet calls [`Self::render`] roughly every 2.7 ms — see the spike
 /// report this crate's plan cites. A first version of this type had `render`
@@ -526,8 +556,8 @@ impl Container {
 /// exact JS-side pattern, including the one caveat a view brings with it:
 /// it detaches if the wasm module's memory grows.
 #[wasm_bindgen]
-pub struct ModulePlayer {
-    engine: play198x_core::engine::Engine,
+pub struct Player {
+    inner: Inner,
     /// Interleaved scratch the engine writes into — [`RENDER_QUANTUM`]
     /// stereo frames, sized once at construction and only ever borrowed as a
     /// slice afterwards, never resized. `Engine::render` wants one
@@ -543,7 +573,7 @@ pub struct ModulePlayer {
 }
 
 #[wasm_bindgen]
-impl ModulePlayer {
+impl Player {
     /// Frames [`Self::render`] fills per call, and the length of the buffers
     /// [`Self::left_ptr`]/[`Self::right_ptr`] point at. A plain function
     /// rather than a duplicated literal on the JavaScript side, so the two
@@ -554,24 +584,43 @@ impl ModulePlayer {
         RENDER_QUANTUM
     }
 
-    /// Decode `bytes` as a ProTracker module and start it playing at
-    /// `sample_rate`.
+    /// Identify `bytes`, build the player the format calls for, and start it
+    /// at `sample_rate`.
     ///
-    /// `bytes` is only borrowed for the parse: [`play198x_core::decode::module`]
-    /// copies everything it needs (sample PCM included) into the returned
-    /// `Module`, so nothing here holds a reference into the caller's buffer
-    /// past this call.
+    /// `song` selects a subtune. A `.ay` carries a table of them — 278 of the
+    /// 696 files in the local archive are multi-song — and each is a separate
+    /// entry point with its own initial register state, which is why choosing
+    /// one *constructs a player* rather than seeking an existing one. A
+    /// module has no subtunes and ignores it.
+    ///
+    /// `bytes` is only borrowed: both decoders copy what they need, so
+    /// nothing here holds a reference into the caller's buffer past this call.
     ///
     /// # Errors
     ///
-    /// When the bytes are not a 4-channel ProTracker module — carrying the
-    /// core's own message unchanged.
+    /// When the bytes are not a format this shell can play, or are a `.ay`
+    /// whose song table has no entry `song` — carrying the core's own message
+    /// unchanged, so the reason reaches the caller rather than a generic
+    /// refusal.
     #[wasm_bindgen(constructor)]
-    pub fn new(bytes: &[u8], sample_rate: u32) -> Result<ModulePlayer, JsError> {
-        let module =
-            play198x_core::decode::module(bytes).map_err(|err| JsError::new(&err.to_string()))?;
+    pub fn new(bytes: &[u8], song: usize, sample_rate: u32) -> Result<Player, JsError> {
+        let inner = match play198x_core::probe::identify(bytes) {
+            Some((play198x_core::probe::Format::Ay, _)) => {
+                let ay = play198x_core::player::ay::AyPlayer::new(bytes, song, sample_rate)
+                    .map_err(|err| JsError::new(&format!("{err:?}")))?;
+                Inner::Ay(Box::new(play198x_core::player::pump::FramePump::new(ay)))
+            }
+            _ => {
+                let module = play198x_core::decode::module(bytes)
+                    .map_err(|err| JsError::new(&err.to_string()))?;
+                Inner::Module(Box::new(play198x_core::engine::Engine::new(
+                    module,
+                    sample_rate,
+                )))
+            }
+        };
         Ok(Self {
-            engine: play198x_core::engine::Engine::new(module, sample_rate),
+            inner,
             interleaved: vec![0.0; RENDER_QUANTUM * 2],
             left: vec![0.0; RENDER_QUANTUM],
             right: vec![0.0; RENDER_QUANTUM],
@@ -599,7 +648,10 @@ impl ModulePlayer {
     /// and the de-interleave loop below writes into `left`/`right` in place.
     pub fn render(&mut self, frames: usize) -> usize {
         let frames = frames.min(RENDER_QUANTUM);
-        let rendered = self.engine.render(&mut self.interleaved[..frames * 2]);
+        let rendered = self
+            .inner
+            .as_player()
+            .render(&mut self.interleaved[..frames * 2]);
         for i in 0..rendered {
             self.left[i] = self.interleaved[i * 2];
             self.right[i] = self.interleaved[i * 2 + 1];
@@ -625,54 +677,133 @@ impl ModulePlayer {
     }
 
     /// Start or pause playback. A paused player keeps its position and its
-    /// clock — see [`Self::render`] — so resuming continues the row it
-    /// stopped in rather than restarting the song.
+    /// clock — see [`Self::render`] — so resuming continues where it stopped
+    /// rather than restarting.
+    #[wasm_bindgen(js_name = setPlaying)]
     pub fn set_playing(&mut self, playing: bool) {
-        self.engine.set_playing(playing);
+        self.inner.as_player().set_playing(playing);
     }
 
     /// Jump to the top of an order, clamped to the song's played prefix.
     /// Cuts any sounding notes, the way a listener dragging a scrub bar
     /// expects.
-    pub fn seek_order(&mut self, order: usize) {
-        self.engine.seek_order(order);
+    ///
+    /// **Modules only**, and it returns whether it applied. A `.ay` has no
+    /// seek: each of its songs is an entry point with its own initial
+    /// register state, so moving between them means building a new player
+    /// (see [`Self::new`]) rather than moving within this one. Returning
+    /// `false` rather than doing nothing quietly is the difference between a
+    /// caller learning that and a scrub bar that looks broken.
+    #[wasm_bindgen(js_name = seekOrder)]
+    pub fn seek_order(&mut self, order: usize) -> bool {
+        match &mut self.inner {
+            Inner::Module(engine) => {
+                engine.seek_order(order);
+                true
+            }
+            Inner::Ay(_) => false,
+        }
     }
 
-    /// Index into the order table's played prefix.
-    #[wasm_bindgen(getter)]
+    /// Which shape of position this player reports: `"module"` or `"frame"`.
+    ///
+    /// A caller reads this once, when the player is built, and then knows
+    /// which of the two groups of getters below mean anything — rather than
+    /// calling all of them and inferring from which returned `undefined`.
+    #[wasm_bindgen(js_name = positionKind)]
     #[must_use]
-    pub fn order(&self) -> usize {
-        self.engine.position().order
+    pub fn position_kind(&self) -> String {
+        match self.position() {
+            play198x_core::player::Position::Module(_) => "module".into(),
+            play198x_core::player::Position::Frame { .. } => "frame".into(),
+        }
     }
 
-    /// The pattern the current order names.
+    /// Index into the order table's played prefix. Modules only.
     #[wasm_bindgen(getter)]
     #[must_use]
-    pub fn pattern(&self) -> usize {
-        self.engine.position().pattern
+    pub fn order(&self) -> Option<usize> {
+        self.module_position().map(|at| at.order)
     }
 
-    /// Row within the current pattern, `0..64`.
+    /// The pattern the current order names. Modules only.
     #[wasm_bindgen(getter)]
     #[must_use]
-    pub fn row(&self) -> usize {
-        self.engine.position().row
+    pub fn pattern(&self) -> Option<usize> {
+        self.module_position().map(|at| at.pattern)
     }
 
-    /// Tick within the current row, `0..speed`.
+    /// Row within the current pattern, `0..64`. Modules only.
     #[wasm_bindgen(getter)]
     #[must_use]
-    pub fn tick(&self) -> u8 {
-        self.engine.position().tick
+    pub fn row(&self) -> Option<usize> {
+        self.module_position().map(|at| at.row)
+    }
+
+    /// Tick within the current row, `0..speed`. Modules only.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tick(&self) -> Option<u8> {
+        self.module_position().map(|at| at.tick)
+    }
+
+    /// The subtune being played. Frame-driven formats only.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn song(&self) -> Option<usize> {
+        match self.position() {
+            play198x_core::player::Position::Frame { song, .. } => Some(song),
+            play198x_core::player::Position::Module(_) => None,
+        }
+    }
+
+    /// Frames played since the song started. Frame-driven formats only.
+    ///
+    /// A tune's own unit of time: a `.ay` declares its length in 50Hz frames,
+    /// so this and that length are directly comparable without either side
+    /// converting to milliseconds first.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn frame(&self) -> Option<u32> {
+        match self.position() {
+            play198x_core::player::Position::Frame { frame, .. } => Some(frame),
+            play198x_core::player::Position::Module(_) => None,
+        }
+    }
+}
+
+impl Player {
+    /// The position, whichever shape it has.
+    ///
+    /// Called through the trait explicitly rather than as a method: `Engine`
+    /// has an inherent `position` returning a bare [`play198x_core::engine::ModulePosition`],
+    /// and method resolution prefers it, so `engine.position()` would quietly
+    /// be the wrong one. Naming the trait keeps the decision about how a
+    /// module's position is wrapped in the trait impl, where it belongs.
+    fn position(&self) -> play198x_core::player::Position {
+        use play198x_core::player::Player as CorePlayer;
+        match &self.inner {
+            Inner::Module(engine) => CorePlayer::position(engine.as_ref()),
+            Inner::Ay(pump) => CorePlayer::position(pump.as_ref()),
+        }
+    }
+
+    /// The position if this is a module, so the four module getters above do
+    /// not each repeat the match.
+    fn module_position(&self) -> Option<play198x_core::engine::ModulePosition> {
+        match self.position() {
+            play198x_core::player::Position::Module(at) => Some(at),
+            play198x_core::player::Position::Frame { .. } => None,
+        }
     }
 }
 
 /// Test-facing accessors, deliberately **not** in the `#[wasm_bindgen] impl`
 /// block above: anything in that block becomes a JS binding, and a
 /// convenient "just copy the samples out for me" method is exactly the
-/// shortcut [`ModulePlayer::render`]'s design exists to make impossible —
-/// production code reads `left`/`right` through [`ModulePlayer::left_ptr`],
-/// [`ModulePlayer::right_ptr`] and [`wasm_memory`] without copying. These
+/// shortcut [`Player::render`]'s design exists to make impossible —
+/// production code reads `left`/`right` through [`Player::left_ptr`],
+/// [`Player::right_ptr`] and [`wasm_memory`] without copying. These
 /// two exist only so the Rust-side tests in `tests/boundary.rs` can check
 /// what `render` wrote without reaching for `unsafe` themselves — this
 /// crate denies `unsafe_code` even in tests, and a raw-pointer read is the
@@ -680,7 +811,7 @@ impl ModulePlayer {
 /// through a view. Named and hidden the same way
 /// [`play198x_core::engine::Engine::debug_channel_volume`] is, for the same
 /// reason.
-impl ModulePlayer {
+impl Player {
     #[doc(hidden)]
     #[must_use]
     pub fn debug_left(&self) -> Vec<f32> {
@@ -695,8 +826,8 @@ impl ModulePlayer {
 }
 
 /// A handle to this wasm instance's linear memory, for building a
-/// `Float32Array` view over [`ModulePlayer::left_ptr`]/
-/// [`ModulePlayer::right_ptr`] without copying — `new
+/// `Float32Array` view over [`Player::left_ptr`]/
+/// [`Player::right_ptr`] without copying — `new
 /// Float32Array(wasmMemory().buffer, ptr, len)`, where `ptr` is a byte
 /// offset (as `left_ptr`/`right_ptr` return it) and `len` is in elements,
 /// per the `Float32Array` constructor's own contract. No new dependency
@@ -709,16 +840,16 @@ impl ModulePlayer {
 /// module's linear memory grows: the runtime gives the module a new, larger
 /// `ArrayBuffer` rather than resizing the old one in place, and a view over
 /// the old one goes dead — reads come back zero, forever, with no
-/// exception. [`ModulePlayer::render`] never causes this itself (its buffers
+/// exception. [`Player::render`] never causes this itself (its buffers
 /// are sized once, at construction, and never grow) — but *another*
 /// allocation in the same wasm instance can: decoding a second module for a
-/// different [`ModulePlayer`] in the same worklet, for one.
+/// different [`Player`] in the same worklet, for one.
 ///
 /// Nothing on this side of the boundary can stop memory from growing, so the
 /// fix belongs to the caller: compare a cached view's `.buffer` against a
 /// fresh `wasmMemory().buffer` by reference before trusting it, and rebuild
 /// the view when they differ. That comparison is a reference check, not an
-/// allocation — cheap enough to run every [`ModulePlayer::render`] call, and
+/// allocation — cheap enough to run every [`Player::render`] call, and
 /// the package README shows the exact pattern.
 ///
 /// Available for the `web` and `nodejs` targets this package builds for —
@@ -728,4 +859,95 @@ impl ModulePlayer {
 #[must_use]
 pub fn wasm_memory() -> JsValue {
     wasm_bindgen::memory()
+}
+
+/// What a `.ay` file says about itself, and about each of its songs.
+///
+/// Built from bytes rather than from a [`Player`], for the same reason
+/// [`module_meta`] is: a player is constructed on the audio thread inside the
+/// worklet, after a visitor has asked for sound, and an info panel — and the
+/// song list a visitor chooses from — must exist before that.
+#[wasm_bindgen]
+pub struct AyMeta {
+    inner: play198x_core::metadata::AyMeta,
+}
+
+/// Describe a `.ay` file.
+///
+/// # Errors
+///
+/// When the bytes are not a `.ay`, carrying the core's own message.
+#[wasm_bindgen(js_name = ayMeta)]
+pub fn ay_meta(bytes: &[u8]) -> Result<AyMeta, JsError> {
+    let file = play198x_core::player::ay::format::parse(bytes)
+        .map_err(|err| JsError::new(&format!("{err:?}")))?;
+    Ok(AyMeta {
+        inner: play198x_core::metadata::ay_meta(&file),
+    })
+}
+
+#[wasm_bindgen]
+impl AyMeta {
+    /// Song 0's name, standing in for a title the format has no file-level
+    /// field for.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn title(&self) -> String {
+        self.inner.title.clone()
+    }
+
+    /// `PAuthor` from the file header.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn author(&self) -> String {
+        self.inner.author.clone()
+    }
+
+    /// `PMisc` from the file header — often a year, a group, or a note.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn misc(&self) -> String {
+        self.inner.misc.clone()
+    }
+
+    /// How many songs the file carries. More than one for 278 of the 696
+    /// files in the local archive, so an interface that ignores this leaves
+    /// most of the corpus unreachable.
+    #[wasm_bindgen(js_name = songCount)]
+    #[must_use]
+    pub fn song_count(&self) -> usize {
+        self.inner.songs.len()
+    }
+
+    /// Song `index`'s name, or `undefined` past the end.
+    #[wasm_bindgen(js_name = songName)]
+    #[must_use]
+    pub fn song_name(&self, index: usize) -> Option<String> {
+        self.inner.songs.get(index).map(|song| song.name.clone())
+    }
+
+    /// How long song `index` plays before fading, in milliseconds.
+    ///
+    /// Converted here rather than at the call site: the file states it in
+    /// 50Hz frames, and a panel that did the arithmetic itself would be a
+    /// second place to get the 50 wrong.
+    #[wasm_bindgen(js_name = songLengthMs)]
+    #[must_use]
+    pub fn song_length_ms(&self, index: usize) -> Option<f64> {
+        self.inner
+            .songs
+            .get(index)
+            .map(|song| f64::from(song.length_frames) * 1000.0 / 50.0)
+    }
+
+    /// How long song `index`'s fade lasts, in milliseconds, following
+    /// [`Self::song_length_ms`].
+    #[wasm_bindgen(js_name = songFadeMs)]
+    #[must_use]
+    pub fn song_fade_ms(&self, index: usize) -> Option<f64> {
+        self.inner
+            .songs
+            .get(index)
+            .map(|song| f64::from(song.fade_frames) * 1000.0 / 50.0)
+    }
 }
