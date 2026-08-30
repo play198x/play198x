@@ -29,7 +29,15 @@ git_tag_enable = true
 changelog_update = true
 # Only reader-facing changes earn a release. Release-process work uses `ci:` or
 # `chore(release):`; changelog filtering alone does not prevent a version bump.
-release_commits = "^(feat|fix|perf|revert)[(:]"
+#
+# `!` is in the class because a breaking change written without a scope —
+# `feat!: …` rather than `feat(ay)!: …` — is still a release, and is in fact
+# the kind most deserving of one. Without it the pattern silently declined to
+# release `feat!: one Player contract, a frame pump, and .ay at the boundary`,
+# and every release before it had passed only because it happened to carry a
+# scope. A conventional-commit type is followed by `(`, `!` or `:`, so all
+# three belong here.
+release_commits = "^(feat|fix|perf|revert)[(!:]"
 # Package-prefixed tags (<crate>-v<version>) even while there's a single crate:
 # it matches the baseline tag and keeps future multi-crate tags unambiguous.
 # Without this, a single-crate workspace defaults to the bare `v<version>`,
