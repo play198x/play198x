@@ -10,7 +10,7 @@
 mod common;
 
 use common::{Cell, SampleSpec, module, paula_rate, square, zero_crossing_hz};
-use play198x_core::engine::{Engine, Position};
+use play198x_core::engine::{Engine, ModulePosition};
 
 const RATE: u32 = 44_100;
 
@@ -86,7 +86,7 @@ fn ticks_and_rows_land_on_exact_frame_boundaries() {
         }
     }
 
-    let at = |order, row, tick| Position {
+    let at = |order, row, tick| ModulePosition {
         order,
         pattern: 0,
         row,
@@ -297,7 +297,7 @@ fn song_length_bounds_the_order_table_not_the_pattern_count() {
         engine.render(&mut a_row);
         assert_eq!(
             engine.position(),
-            Position {
+            ModulePosition {
                 order: 0,
                 pattern: 0,
                 row,
@@ -311,7 +311,7 @@ fn song_length_bounds_the_order_table_not_the_pattern_count() {
     engine.render(&mut one_frame);
     assert_eq!(
         engine.position(),
-        Position {
+        ModulePosition {
             order: 0,
             pattern: 0,
             row: 0,
@@ -379,7 +379,7 @@ fn seeking_moves_the_sequencer_and_cuts_the_sounding_voices() {
     engine.seek_order(1);
     assert_eq!(
         engine.position(),
-        Position {
+        ModulePosition {
             order: 1,
             pattern: 1,
             row: 0,

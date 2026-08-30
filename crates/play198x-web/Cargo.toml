@@ -1,6 +1,6 @@
 [package]
 name = "play198x-web"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-2.0-or-later"
@@ -14,7 +14,10 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-play198x-core = { path = "../play198x-core" }
+# `ay` on: this shell plays .ay tunes as well as modules. Measured cost
+# of the feature in the shipped .wasm, measured against the build without
+# it: +37.7 KiB raw, +13.6 KiB gzipped.
+play198x-core = { path = "../play198x-core", features = ["ay"] }
 wasm-bindgen = "0.2"
 
 [dev-dependencies]

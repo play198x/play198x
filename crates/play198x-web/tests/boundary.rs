@@ -257,9 +257,8 @@ fn synthetic_module_panned_left() -> Vec<u8> {
 
 #[wasm_bindgen_test]
 fn render_puts_a_hard_left_note_in_the_left_buffer_only() {
-    let mut player =
-        play198x_web::ModulePlayer::new(&synthetic_module_panned_left(), 48_000).unwrap();
-    let quantum = play198x_web::ModulePlayer::render_quantum();
+    let mut player = play198x_web::Player::new(&synthetic_module_panned_left(), 0, 48_000).unwrap();
+    let quantum = play198x_web::Player::render_quantum();
     player.render(quantum);
 
     let left = player.debug_left();
@@ -276,8 +275,8 @@ fn render_puts_a_hard_left_note_in_the_left_buffer_only() {
 
 #[wasm_bindgen_test]
 fn a_player_renders_the_frames_it_is_asked_for() {
-    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
-    let quantum = play198x_web::ModulePlayer::render_quantum();
+    let mut player = play198x_web::Player::new(&synthetic_module(), 0, 48_000).unwrap();
+    let quantum = play198x_web::Player::render_quantum();
     assert_eq!(player.render(quantum), quantum);
 }
 
@@ -287,16 +286,16 @@ fn render_clamps_a_request_past_the_render_quantum() {
     // `render_quantum()` frames and never grown — a request for more must
     // clip rather than reallocate, which is the property a cached
     // `Float32Array` view over them depends on.
-    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
-    let quantum = play198x_web::ModulePlayer::render_quantum();
+    let mut player = play198x_web::Player::new(&synthetic_module(), 0, 48_000).unwrap();
+    let quantum = play198x_web::Player::render_quantum();
     assert_eq!(player.render(quantum + 1_000), quantum);
 }
 
 #[wasm_bindgen_test]
 fn a_paused_player_renders_silence_rather_than_stopping() {
-    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let mut player = play198x_web::Player::new(&synthetic_module(), 0, 48_000).unwrap();
     player.set_playing(false);
-    let quantum = play198x_web::ModulePlayer::render_quantum();
+    let quantum = play198x_web::Player::render_quantum();
     let rendered = player.render(quantum);
     assert_eq!(rendered, quantum, "a paused player still fills its buffers");
     assert!(
@@ -317,8 +316,8 @@ fn render_buffers_keep_the_same_address_across_calls() {
     // wasm memory itself can still grow and detach the view regardless, is
     // documented on `wasm_memory` and is a JS-side concern this crate
     // cannot test from here).
-    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
-    let quantum = play198x_web::ModulePlayer::render_quantum();
+    let mut player = play198x_web::Player::new(&synthetic_module(), 0, 48_000).unwrap();
+    let quantum = play198x_web::Player::render_quantum();
     player.render(quantum);
     let (left_before, right_before) = (player.left_ptr(), player.right_ptr());
     player.render(quantum);
@@ -328,23 +327,196 @@ fn render_buffers_keep_the_same_address_across_calls() {
 
 #[wasm_bindgen_test]
 fn bytes_that_are_not_a_module_are_an_error_not_a_guess() {
-    assert!(play198x_web::ModulePlayer::new(&screen(PAPER_CYAN_INK_BLACK), 48_000).is_err());
+    assert!(play198x_web::Player::new(&screen(PAPER_CYAN_INK_BLACK), 0, 48_000).is_err());
 }
 
 #[wasm_bindgen_test]
 fn a_fresh_player_starts_at_the_top_of_the_order_table() {
-    let player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
-    assert_eq!(player.order(), 0);
-    assert_eq!(player.pattern(), 0);
-    assert_eq!(player.row(), 0);
-    assert_eq!(player.tick(), 0);
+    let player = play198x_web::Player::new(&synthetic_module(), 0, 48_000).unwrap();
+    assert_eq!(player.order(), Some(0));
+    assert_eq!(player.pattern(), Some(0));
+    assert_eq!(player.row(), Some(0));
+    assert_eq!(player.tick(), Some(0));
 }
 
 #[wasm_bindgen_test]
 fn seek_order_clamps_to_the_songs_played_prefix() {
-    let mut player = play198x_web::ModulePlayer::new(&synthetic_module(), 48_000).unwrap();
+    let mut player = play198x_web::Player::new(&synthetic_module(), 0, 48_000).unwrap();
     // The synthetic module plays exactly one order (song length 1), so any
     // order past that clamps back to the last playable one, order 0.
     player.seek_order(99);
-    assert_eq!(player.order(), 0);
+    assert_eq!(player.order(), Some(0));
+}
+
+/// A minimal three-song `.ay` whose init and interrupt both return at once.
+///
+/// Built here rather than shared with the core's fixtures: the two crates
+/// have separate test trees, and a `.ay` is small enough that a second
+/// hand-written copy of the layout would be the larger cost. Only the parts
+/// this shell reads are filled in — the song table and the strings — since
+/// nothing here checks what the tune sounds like.
+fn three_song_ay() -> Vec<u8> {
+    let songs: [(u16, u16); 3] = [(100, 10), (250, 25), (999, 99)];
+    let mut b = b"ZXAYEMUL".to_vec();
+    b.push(0); // FileVersion
+    b.push(3); // PlayerVersion
+    b.extend_from_slice(&0i16.to_be_bytes()); // PSpecialPlayer
+    let author_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PAuthor
+    let misc_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PMisc
+    b.push((songs.len() - 1) as u8); // NumOfSongs - 1
+    b.push(0); // FirstSong
+    let structure_ptr_at = b.len();
+    b.extend_from_slice(&0i16.to_be_bytes()); // PPointsSongsStructure
+
+    let rel = |from: usize, to: usize| ((to as i64) - (from as i64)) as i16;
+
+    let author_at = b.len();
+    b.extend_from_slice(b"Steve\0");
+    let misc_at = b.len();
+    b.extend_from_slice(b"notes\0");
+
+    let mut name_at = Vec::new();
+    for index in 0..songs.len() {
+        name_at.push(b.len());
+        b.extend_from_slice(format!("Song {index}\0").as_bytes());
+    }
+
+    let structure_at = b.len();
+    let mut name_ptr_at = Vec::new();
+    let mut data_ptr_at = Vec::new();
+    for _ in 0..songs.len() {
+        name_ptr_at.push(b.len());
+        b.extend_from_slice(&0i16.to_be_bytes());
+        data_ptr_at.push(b.len());
+        b.extend_from_slice(&0i16.to_be_bytes());
+    }
+
+    let mut data_at = Vec::new();
+    let mut points_ptr_at = Vec::new();
+    let mut addrs_ptr_at = Vec::new();
+    for &(length, fade) in &songs {
+        data_at.push(b.len());
+        b.extend_from_slice(&[0, 1, 2, 3]); // AChan..Noise
+        b.extend_from_slice(&length.to_be_bytes()); // SongLength
+        b.extend_from_slice(&fade.to_be_bytes()); // FadeLength
+        b.push(0); // HiReg
+        b.push(0); // LoReg
+        points_ptr_at.push(b.len());
+        b.extend_from_slice(&0i16.to_be_bytes()); // PPoints
+        addrs_ptr_at.push(b.len());
+        b.extend_from_slice(&0i16.to_be_bytes()); // PAddresses
+    }
+
+    let mut points_at = Vec::new();
+    let mut addrs_at = Vec::new();
+    let mut block_ptr_at = Vec::new();
+    for _ in 0..songs.len() {
+        points_at.push(b.len());
+        b.extend_from_slice(&0xC000u16.to_be_bytes()); // Stack
+        b.extend_from_slice(&0x8000u16.to_be_bytes()); // Init
+        b.extend_from_slice(&0x8000u16.to_be_bytes()); // Interrupt
+
+        addrs_at.push(b.len());
+        b.extend_from_slice(&0x8000u16.to_be_bytes()); // block address
+        b.extend_from_slice(&1u16.to_be_bytes()); // block length
+        block_ptr_at.push(b.len());
+        b.extend_from_slice(&0i16.to_be_bytes()); // block pointer
+        b.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // terminator
+    }
+
+    let block_at = b.len();
+    b.push(0xC9); // RET
+
+    let mut put = |at: usize, target: usize| {
+        let delta = rel(at, target).to_be_bytes();
+        b[at] = delta[0];
+        b[at + 1] = delta[1];
+    };
+    put(author_ptr_at, author_at);
+    put(misc_ptr_at, misc_at);
+    put(structure_ptr_at, structure_at);
+    for i in 0..songs.len() {
+        put(name_ptr_at[i], name_at[i]);
+        put(data_ptr_at[i], data_at[i]);
+        put(points_ptr_at[i], points_at[i]);
+        put(addrs_ptr_at[i], addrs_at[i]);
+        put(block_ptr_at[i], block_at);
+    }
+    b
+}
+
+#[wasm_bindgen_test]
+fn an_ay_builds_a_frame_driven_player() {
+    let player = play198x_web::Player::new(&three_song_ay(), 0, 48_000).unwrap();
+
+    assert_eq!(player.position_kind(), "frame");
+    assert_eq!(player.song(), Some(0));
+    assert_eq!(player.frame(), Some(0));
+    // The module getters mean nothing here, and say so rather than lying
+    // with a zero.
+    assert_eq!(player.order(), None);
+    assert_eq!(player.tick(), None);
+}
+
+#[wasm_bindgen_test]
+fn an_ay_fills_a_whole_quantum_from_its_own_frames() {
+    let mut player = play198x_web::Player::new(&three_song_ay(), 0, 48_000).unwrap();
+
+    // The player produces 960-sample frames; the worklet asks for 128. Ten
+    // calls crosses the seam, and every one must come back full.
+    let quantum = play198x_web::Player::render_quantum();
+    for _ in 0..10 {
+        assert_eq!(player.render(quantum), quantum);
+    }
+    assert_eq!(player.debug_left().len(), quantum);
+}
+
+#[wasm_bindgen_test]
+fn a_subtune_is_chosen_when_the_player_is_built() {
+    // Each song is a separate entry point, so selecting one builds a player
+    // rather than seeking an existing one.
+    let player = play198x_web::Player::new(&three_song_ay(), 2, 48_000).unwrap();
+    assert_eq!(player.song(), Some(2));
+}
+
+#[wasm_bindgen_test]
+fn a_song_the_file_does_not_have_is_refused() {
+    let err = match play198x_web::Player::new(&three_song_ay(), 3, 48_000) {
+        Ok(_) => panic!("a song index past the end of the table must be refused"),
+        Err(err) => err,
+    };
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("NoSuchSong"),
+        "the core's own reason should reach the caller: {message}"
+    );
+}
+
+#[wasm_bindgen_test]
+fn an_ay_cannot_be_seeked_and_says_so() {
+    let mut player = play198x_web::Player::new(&three_song_ay(), 0, 48_000).unwrap();
+    assert!(
+        !player.seek_order(1),
+        "a .ay has no seek; returning false is how a caller learns that"
+    );
+}
+
+#[wasm_bindgen_test]
+fn ay_metadata_reports_every_song_with_its_own_length() {
+    let meta = play198x_web::ay_meta(&three_song_ay()).unwrap();
+
+    assert_eq!(meta.author(), "Steve");
+    assert_eq!(meta.misc(), "notes");
+    assert_eq!(meta.song_count(), 3);
+    assert_eq!(meta.song_name(1), Some("Song 1".to_string()));
+    assert_eq!(meta.song_name(3), None);
+
+    // 100, 250 and 999 frames at 50Hz. Deliberately different, so this test
+    // can tell each song's own length from song 0's given three times.
+    assert_eq!(meta.song_length_ms(0), Some(2_000.0));
+    assert_eq!(meta.song_length_ms(1), Some(5_000.0));
+    assert_eq!(meta.song_length_ms(2), Some(19_980.0));
+    assert_eq!(meta.song_fade_ms(2), Some(1_980.0));
 }

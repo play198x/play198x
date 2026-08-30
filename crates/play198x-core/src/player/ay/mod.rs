@@ -216,6 +216,10 @@ impl DcBlocker {
 pub struct AyPlayer {
     pub host: SpectrumHost,
     song: Song,
+    /// The index `new` was given, so the player can say which subtune of
+    /// the file it is playing — the `Song` above is the entry itself and
+    /// does not carry its own position in the table.
+    song_index: usize,
     frames_played: u32,
     samples_per_frame: usize,
     ay_tick_accumulator: u32,
@@ -294,6 +298,10 @@ impl AyPlayer {
     /// When the bytes are not an `.ay` file, or `song` is out of range.
     pub fn new(bytes: &[u8], song: usize, sample_rate: u32) -> Result<Self, AyError> {
         let file: AyFile = format::parse(bytes)?;
+        // Kept before `song` is shadowed by the entry it names: the entry
+        // does not carry its own index, and a player must be able to say
+        // which subtune it is.
+        let song_index = song;
         let song = file.songs.get(song).cloned().ok_or(AyError::NoSuchSong)?;
 
         let mut host = SpectrumHost::new();
@@ -356,6 +364,7 @@ impl AyPlayer {
         let mut player = Self {
             host,
             song,
+            song_index,
             frames_played: 0,
             samples_per_frame,
             ay_tick_accumulator: 0,
@@ -465,7 +474,7 @@ impl AyPlayer {
     /// `tests/engine_allocations.rs` counts, because a player that allocates
     /// on the audio thread glitches on somebody else's machine and never on
     /// yours. The same contract [`crate::engine::Engine::render`] keeps.
-    pub fn render(&mut self, out: &mut [f32]) -> usize {
+    pub fn render_frame(&mut self, out: &mut [f32]) -> usize {
         // Taken out of `self` so the chip and the DC blocker can be borrowed
         // mutably alongside it, and put back before returning. The `Vec`
         // itself is never reallocated, so this moves a header, not data.
@@ -733,5 +742,30 @@ impl AyPlayer {
                 self.beeper.push(filtered);
             }
         }
+    }
+}
+
+impl crate::player::pump::FrameSource for AyPlayer {
+    /// Runs one frame, discarding whether the interrupt routine returned in
+    /// budget. That fact is real and worth counting — `tests/ay_corpus.rs`
+    /// counts it — but it is a fact about a tune, not something a pump can
+    /// act on, so it stays on the inherent [`AyPlayer::frame`].
+    fn frame(&mut self) {
+        let _ = AyPlayer::frame(self);
+    }
+
+    fn render_frame(&mut self, out: &mut [f32]) -> usize {
+        AyPlayer::render_frame(self, out)
+    }
+
+    /// Constant for this format: `.ay` is driven by the Spectrum's 50Hz
+    /// interrupt and nothing varies it. The trait asks every frame anyway,
+    /// for the formats where it does vary.
+    fn samples_per_frame(&self) -> usize {
+        self.samples_per_frame
+    }
+
+    fn song(&self) -> usize {
+        self.song_index
     }
 }

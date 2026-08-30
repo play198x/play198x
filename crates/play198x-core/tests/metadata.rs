@@ -329,13 +329,14 @@ fn ay_meta_reports_the_first_songs_name_as_the_title() {
     let meta = ay_meta(&file);
 
     // `.ay` carries no file-level title — only `PAuthor` and `PMisc` — so
-    // `AyMeta::title` and `AyMeta::length_frames` stand in with song 0's,
-    // per its doc comment.
+    // `AyMeta::title` stands in with song 0's name, per its doc comment.
     assert_eq!(meta.title, "Test Tune");
     assert_eq!(meta.author, "Steve");
     assert_eq!(meta.misc, "notes");
-    assert_eq!(meta.songs, vec!["Test Tune".to_string()]);
-    assert_eq!(meta.length_frames, 500);
+    assert_eq!(meta.songs.len(), 1);
+    assert_eq!(meta.songs[0].name, "Test Tune");
+    assert_eq!(meta.songs[0].length_frames, 500);
+    assert_eq!(meta.songs[0].fade_frames, 50);
 
     let wrapped = Metadata::Ay(meta);
     match wrapped {
@@ -344,4 +345,53 @@ fn ay_meta_reports_the_first_songs_name_as_the_title() {
             panic!("an .ay tune is neither a picture nor a module")
         }
     }
+}
+
+/// Each song's own length, not the first song's.
+///
+/// `AyMeta` used to carry a single `length_frames` taken from song 0, which
+/// is wrong the moment an interface lets a visitor choose a song. The three
+/// songs here are given **different** lengths deliberately: with equal ones
+/// this test could not tell a correct implementation from the bug it exists
+/// to catch.
+#[test]
+#[cfg(feature = "ay")]
+fn ay_metadata_reports_each_songs_own_length() {
+    use common::{AySongSpec, build_ay_songs_with};
+
+    let spec = |hi, lo, length_frames, fade_frames| AySongSpec {
+        hi_reg: hi,
+        lo_reg: lo,
+        length_frames,
+        fade_frames,
+    };
+    let bytes = build_ay_songs_with(
+        &[
+            spec(0x11, 0x22, 100, 10),
+            spec(0x33, 0x44, 250, 25),
+            spec(0x55, 0x66, 999, 99),
+        ],
+        0x8000,
+        0x8010,
+        0x8000,
+        &[0xC9],
+    );
+
+    let file = play198x_core::player::ay::format::parse(&bytes).unwrap();
+    let meta = play198x_core::metadata::ay_meta(&file);
+
+    assert_eq!(meta.author, "Steve");
+    assert_eq!(meta.songs.len(), 3);
+    assert_eq!(
+        meta.songs
+            .iter()
+            .map(|s| s.length_frames)
+            .collect::<Vec<_>>(),
+        vec![100, 250, 999]
+    );
+    assert_eq!(
+        meta.songs.iter().map(|s| s.fade_frames).collect::<Vec<_>>(),
+        vec![10, 25, 99]
+    );
+    assert_eq!(meta.songs[1].name, "Test Tune 1");
 }

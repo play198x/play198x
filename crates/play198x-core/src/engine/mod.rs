@@ -106,9 +106,13 @@ const WALK_TICK_CAP: u32 = 10_000_000;
 /// two megabytes at the very worst and a few kilobytes for real music.
 const VISIT_CAP: usize = 128 * ROWS_PER_PATTERN * 16;
 
-/// Where playback has got to.
+/// Where playback has got to in a tracker module.
+///
+/// Named for the shape rather than for "a position", because it is one of
+/// two: see [`crate::player::Position`], which holds this alongside the
+/// song-and-frame form every interrupt-driven format reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Position {
+pub struct ModulePosition {
     /// Index into the order table's played prefix — `0..song_length`.
     pub order: usize,
     /// The pattern that order names. May be past the end of the patterns the
@@ -475,8 +479,8 @@ impl Engine {
 
     /// Where playback has got to.
     #[must_use]
-    pub fn position(&self) -> Position {
-        Position {
+    pub fn position(&self) -> ModulePosition {
+        ModulePosition {
             order: self.state.order,
             pattern: pattern_at(&self.module, self.state.order),
             row: self.state.row,
@@ -836,4 +840,21 @@ fn pattern_at(module: &Module, order: usize) -> usize {
 /// overflow is still not allowed to unwind if it does.
 fn millis(ms: f64) -> Duration {
     Duration::try_from_secs_f64(ms / 1_000.0).unwrap_or(Duration::ZERO)
+}
+
+impl crate::player::Player for Engine {
+    /// Delegates to [`Engine::render`], which already satisfies the trait's
+    /// rule: it fills the whole request, and renders exact zeroes rather than
+    /// a short buffer when the transport is stopped.
+    fn render(&mut self, out: &mut [f32]) -> usize {
+        Engine::render(self, out)
+    }
+
+    fn set_playing(&mut self, playing: bool) {
+        Engine::set_playing(self, playing);
+    }
+
+    fn position(&self) -> crate::player::Position {
+        crate::player::Position::Module(Engine::position(self))
+    }
 }

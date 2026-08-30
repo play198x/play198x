@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **One `Player` contract, and a pump for the players that think in frames.**
+  `player::Player` — `render`, `set_playing`, `position` — is what a consumer
+  holds instead of a type per format. `Engine` implements it directly; a tune
+  that is really a program cannot, because it produces one 50Hz frame at a
+  time while a Web Audio worklet asks for 128 samples, so
+  `player::pump::FramePump` reconciles the two behind a `FrameSource` trait.
+  That seam is where a 50Hz click would come from, so it is written and tested
+  once rather than per format — SID, NSF and SAP implement one trait and
+  inherit both.
+- `player::Position` reports where playback has got to: `Module` for a tracker
+  module walking an order table, `Frame { song, frame }` for everything driven
+  by an interrupt. One variant per *shape* rather than per format, so adding
+  SID will not change it.
+
+### Changed
+
+- **Breaking: `engine::Position` is now `engine::ModulePosition`.** The name
+  was accurate when there was one kind of position and misleading now that
+  `player::Position` holds both.
+- **Breaking: `AyPlayer::render` is now `render_frame`.** It fills exactly one
+  frame, while `Player::render` fills any request; two contracts sharing a
+  name is how a caller asks for 128 samples and silently gets 960.
+- **Breaking: `AyMeta::songs` is `Vec<AySong>` and `AyMeta::length_frames` is
+  gone.** Each song carries its own length and fade. A single file-level
+  figure was song 0's answer given to every question, which is wrong the
+  moment an interface offers a choice of song — and 278 of the 696 files in
+  the local archive are multi-song.
+
 ## [0.3.0](https://github.com/play198x/play198x/compare/play198x-core-v0.2.0...play198x-core-v0.3.0) - 2026-08-29
 
 ### Changed
