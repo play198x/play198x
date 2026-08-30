@@ -156,3 +156,48 @@ jobs:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # The shell is excluded from the workspace (see the root Cargo.toml: its
+      # wasm toolchain and `unsafe_code` allowance stay out of a library that
+      # forbids unsafe), so it carries its own lockfile. release-plz bumps the
+      # workspace lockfile and never touches that one, so every release PR
+      # arrives with the shell still pinned to the previous version and fails
+      # ci.yml's "The shell's lockfile must not lag its dependencies" gate on
+      # exactly that line. Measured on the v0.3.0 release PR, which had to be
+      # fixed by hand before it could merge.
+      #
+      # The branch is found through `gh` rather than the action's outputs, so
+      # that a change to its output schema surfaces as "no release PR found"
+      # rather than as a step that silently stops doing anything.
+      - name: Point the shell's lockfile at the released version
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch=$(gh pr list --state open --json headRefName \
+            -q '[.[] | select(.headRefName | startswith("release-plz-")) | .headRefName][0] // empty')
+          if [ -z "$branch" ]; then
+            echo "No release PR open; nothing to update."
+            exit 0
+          fi
+
+          git fetch origin "$branch"
+          git checkout "$branch"
+
+          # `-p play198x-core`, not a bare `cargo update`: a bare one also
+          # refreshes unrelated transitive dependencies, which puts a
+          # dependency bump nobody reviewed into a release that should carry
+          # only the release.
+          cargo update -p play198x-core --manifest-path crates/play198x-web/Cargo.toml
+
+          if git diff --quiet crates/play198x-web/Cargo.lock; then
+            echo "The shell's lockfile is already current."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q crates/play198x-web/Cargo.lock \
+            -m "chore(web): point the shell's lockfile at the released version"
+          git push origin "$branch"
+          echo "Updated the shell's lockfile on $branch."
