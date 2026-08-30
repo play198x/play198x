@@ -16,9 +16,11 @@
 //!
 //! A tracker engine keeps its own clock and can fill any request. A tune that
 //! is really a program cannot: it runs one interrupt, produces one frame's
-//! worth of samples, and must be asked again. Reconciling those two is an
-//! adapter's job rather than the caller's or this trait's, so that neither
-//! learns that some formats arrive a frame at a time.
+//! worth of samples, and must be asked again. Those are reconciled by
+//! [`pump::FramePump`], not by the caller and not by this trait — see that
+//! module for why the seam belongs there rather than in either.
+
+pub mod pump;
 
 #[cfg(feature = "ay")]
 pub mod ay;
