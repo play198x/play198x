@@ -23,6 +23,10 @@ published CPU and AY crates on a ROM-free 128K Spectrum host, including its
 beeper, subtunes, memory paging and AY register reads. A callable PSID's 6502
 code runs against Emu198x's SID core; RSID, self-driven, multi-SID and
 ROM-dependent tunes are identified and explicitly declined.
+Open replacement ROMs do not extend that callable slice; the measured benefit
+does not justify a firmware distribution surface or output that cannot be
+claimed compatible with an original C64. See the
+[decision record](decisions/open-roms-do-not-extend-callable-sid-playback.md).
 
 There is no desktop shell yet. It comes after the web one and is deliberately
 thin, the same way: anything a shell can do is an operation the core exposes,
