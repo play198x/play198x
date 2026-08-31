@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "adler2"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -33,6 +27,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "emu198x-mos-6502"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21810616766246b0478d12c88547c6fca3553cf69c675fdf7278566251b41ca2"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "emu198x-mos-sid-6581"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33233fd4517cd1d287366c191e8a9549778011eca11316ad3d5725865ace322b"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "emu198x-zilog-z80"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -49,31 +61,30 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
- "miniz_oxide",
  "zlib-rs",
 ]
 
 [[package]]
 name = "format198x-commodore-amiga-adf"
-version = "0.3.0"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a678aefa033ad667e40c1655f2fcbe0aa2e5d4d0a706eff60a92f08a479eb62"
+checksum = "2ed288a79912b3af0eafa304afb2ff2ac27668ba88efcce03ef2a1b3ae9c0bca"
 
 [[package]]
 name = "format198x-commodore-amiga-ilbm"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45cdd65f89ae0464febcfd7d591791039b10b44cb9cc23e0b140b90ae0d748f9"
+checksum = "e689ce92d88dfae3a08a054e1fc0e6915133491dacb6a0c6236c5b9d3b3f60ca"
 
 [[package]]
 name = "format198x-commodore-amiga-mod"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9ce42b0108f0abeb4e715da41d55eb33683114c393c101ed4ec736866ce208b"
+checksum = "9eda656c743e32ff6ee137fd601a960fd1143dabbbaf500250bd95ffe9366dd1"
 
 [[package]]
 name = "format198x-commodore-amiga-powerpacker"
@@ -107,9 +118,9 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown",
@@ -128,20 +139,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "miniz_oxide"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
-dependencies = [
- "adler2",
- "simd-adler32",
-]
-
-[[package]]
 name = "play198x-core"
 version = "0.4.0"
 dependencies = [
  "emu198x-gi-ay-3-8910",
+ "emu198x-mos-6502",
+ "emu198x-mos-sid-6581",
  "emu198x-zilog-z80",
  "format198x-commodore-amiga-adf",
  "format198x-commodore-amiga-ilbm",
@@ -201,12 +204,6 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[package]]
-name = "simd-adler32"
-version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "syn"

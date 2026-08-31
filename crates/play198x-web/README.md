@@ -13,6 +13,7 @@ player for vintage formats.
 |---|---|
 | SCREEN$ (`.scr`) | ZX Spectrum |
 | ZXAY/EMUL (`.ay`) | ZX Spectrum 128K |
+| PSID (`.sid`, callable and ROM-free) | Commodore 64 |
 | Koala Painter | Commodore 64 |
 | Advanced Art Studio | Commodore 64 |
 | ILBM / IFF | Commodore Amiga |
@@ -109,7 +110,7 @@ than after.
 
 ### Playing audio
 
-`Player` wraps either a decoded ProTracker module or a ZX Spectrum `.ay` tune
+`Player` wraps a decoded ProTracker module, ZX Spectrum `.ay` tune, or callable PSID tune
 behind one transport. It is built for an `AudioWorkletProcessor`: construct it
 once inside the worklet, then call `render` from `process()` — called roughly
 every 2.7 ms at 48 kHz, 128 frames (`Player.renderQuantum()`) at a time.

@@ -297,11 +297,13 @@ fn the_metadata_enum_holds_one_shape_or_the_other() {
         Metadata::Image(meta) => assert_eq!(meta.source, "a.scr"),
         Metadata::Module(_) => panic!("a screen is not a module"),
         Metadata::Ay(_) => panic!("a screen is not an .ay tune"),
+        Metadata::Sid(_) => panic!("a screen is not a SID tune"),
     }
     match song {
         Metadata::Module(meta) => assert_eq!(meta.title, "TUNE"),
         Metadata::Image(_) => panic!("a module is not a picture"),
         Metadata::Ay(_) => panic!("a module is not an .ay tune"),
+        Metadata::Sid(_) => panic!("a module is not a SID tune"),
     }
 }
 
@@ -344,6 +346,7 @@ fn ay_meta_reports_the_first_songs_name_as_the_title() {
         Metadata::Image(_) | Metadata::Module(_) => {
             panic!("an .ay tune is neither a picture nor a module")
         }
+        Metadata::Sid(_) => panic!("an .ay tune is not a SID tune"),
     }
 }
 

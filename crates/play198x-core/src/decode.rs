@@ -94,6 +94,11 @@ pub fn image(bytes: &[u8], format: Format) -> Result<Image, Error> {
             what: "an .ay tune is code for a Z80 to run, not a picture; use `player::ay`"
                 .to_owned(),
         }),
+        Format::Sid => Err(Error::Decode {
+            format,
+            what: "a SID tune is 6502 code and chip data, not a picture; use `player::sid`"
+                .to_owned(),
+        }),
     }
 }
 

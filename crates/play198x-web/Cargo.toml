@@ -20,6 +20,10 @@ crate-type = ["cdylib", "rlib"]
 play198x-core = { path = "../play198x-core", features = ["ay"] }
 wasm-bindgen = "0.2"
 
+[features]
+default = ["sid"]
+sid = ["play198x-core/sid"]
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 

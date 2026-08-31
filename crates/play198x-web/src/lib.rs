@@ -28,7 +28,7 @@ pub struct Probed {
 
 #[wasm_bindgen]
 impl Probed {
-    /// One of `scr`, `koala`, `art-studio`, `ilbm`, `protracker`, `ay`.
+    /// One of `scr`, `koala`, `art-studio`, `ilbm`, `protracker`, `ay`, `sid`.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn format(&self) -> String {
@@ -65,6 +65,7 @@ fn format_name(format: Format) -> &'static str {
         // to produce; a wildcard arm here would just move that failure to
         // the boundary.
         Format::Ay => "ay",
+        Format::Sid => "sid",
         // `Format` is #[non_exhaustive]: a new variant must be named here
         // before it can cross, rather than crossing as something wrong.
         _ => "unknown",
@@ -169,6 +170,7 @@ fn format_from_name(name: &str) -> Option<Format> {
         "ilbm" => Some(Format::Ilbm),
         "protracker" => Some(Format::ProTracker),
         "ay" => Some(Format::Ay),
+        "sid" => Some(Format::Sid),
         _ => None,
     }
 }
@@ -521,6 +523,8 @@ impl Container {
 enum Inner {
     Module(Box<play198x_core::engine::Engine>),
     Ay(Box<play198x_core::player::pump::FramePump<play198x_core::player::ay::AyPlayer>>),
+    #[cfg(feature = "sid")]
+    Sid(Box<play198x_core::player::pump::FramePump<play198x_core::player::sid::SidPlayer>>),
 }
 
 impl Inner {
@@ -529,6 +533,16 @@ impl Inner {
         match self {
             Inner::Module(engine) => engine.as_mut(),
             Inner::Ay(pump) => pump.as_mut(),
+            #[cfg(feature = "sid")]
+            Inner::Sid(pump) => pump.as_mut(),
+        }
+    }
+
+    fn playback_error(&self) -> Option<String> {
+        match self {
+            Self::Module(_) | Self::Ay(_) => None,
+            #[cfg(feature = "sid")]
+            Self::Sid(pump) => pump.source().last_error().map(ToString::to_string),
         }
     }
 }
@@ -610,6 +624,12 @@ impl Player {
                     .map_err(|err| JsError::new(&format!("{err:?}")))?;
                 Inner::Ay(Box::new(play198x_core::player::pump::FramePump::new(ay)))
             }
+            #[cfg(feature = "sid")]
+            Some((play198x_core::probe::Format::Sid, _)) => {
+                let sid = play198x_core::player::sid::SidPlayer::new(bytes, song, sample_rate)
+                    .map_err(|err| JsError::new(&err.to_string()))?;
+                Inner::Sid(Box::new(play198x_core::player::pump::FramePump::new(sid)))
+            }
             _ => {
                 let module = play198x_core::decode::module(bytes)
                     .map_err(|err| JsError::new(&err.to_string()))?;
@@ -659,6 +679,14 @@ impl Player {
         rendered
     }
 
+    /// A typed playback refusal discovered after construction, such as a PSID
+    /// routine reading a mapped C64 ROM. Empty while playback is healthy.
+    #[wasm_bindgen(getter, js_name = playbackError)]
+    #[must_use]
+    pub fn playback_error(&self) -> Option<String> {
+        self.inner.playback_error()
+    }
+
     /// Pointer to the left channel's buffer in wasm linear memory,
     /// [`Self::render_quantum`] frames long. Build a `Float32Array` over it
     /// with [`wasm_memory`] — see that function's doc for the one thing to
@@ -702,6 +730,8 @@ impl Player {
                 true
             }
             Inner::Ay(_) => false,
+            #[cfg(feature = "sid")]
+            Inner::Sid(_) => false,
         }
     }
 
@@ -785,6 +815,8 @@ impl Player {
         match &self.inner {
             Inner::Module(engine) => CorePlayer::position(engine.as_ref()),
             Inner::Ay(pump) => CorePlayer::position(pump.as_ref()),
+            #[cfg(feature = "sid")]
+            Inner::Sid(pump) => CorePlayer::position(pump.as_ref()),
         }
     }
 
@@ -949,5 +981,52 @@ impl AyMeta {
             .songs
             .get(index)
             .map(|song| f64::from(song.fade_frames) * 1000.0 / 50.0)
+    }
+}
+
+/// Header metadata for a PSID/RSID container.
+#[cfg(feature = "sid")]
+#[wasm_bindgen]
+pub struct SidMeta {
+    inner: play198x_core::metadata::SidMeta,
+}
+
+#[cfg(feature = "sid")]
+#[wasm_bindgen(js_name = sidMeta)]
+pub fn sid_meta(bytes: &[u8]) -> Result<SidMeta, JsError> {
+    let file = play198x_core::player::sid::format::parse(bytes)
+        .map_err(|err| JsError::new(&err.to_string()))?;
+    Ok(SidMeta {
+        inner: play198x_core::metadata::sid_meta(&file),
+    })
+}
+
+#[cfg(feature = "sid")]
+#[wasm_bindgen]
+impl SidMeta {
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn title(&self) -> String {
+        self.inner.title.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn author(&self) -> String {
+        self.inner.author.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn released(&self) -> String {
+        self.inner.released.clone()
+    }
+    #[wasm_bindgen(js_name = songCount)]
+    #[must_use]
+    pub fn song_count(&self) -> u16 {
+        self.inner.songs
+    }
+    #[wasm_bindgen(getter, js_name = startSong)]
+    #[must_use]
+    pub fn start_song(&self) -> usize {
+        self.inner.start_song
     }
 }

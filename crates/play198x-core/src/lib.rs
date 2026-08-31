@@ -27,7 +27,7 @@ pub mod engine;
 pub mod metadata;
 pub mod probe;
 
-#[cfg(feature = "ay")]
+#[cfg(any(feature = "ay", feature = "sid"))]
 pub mod host;
 pub mod player;
 
