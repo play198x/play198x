@@ -13,6 +13,13 @@
 //! renderers in turn rather than one test each. Two `#[test]`s here would
 //! run concurrently and count each other, which is the same failure from
 //! the inside.
+//!
+//! The counter is thread-local as well as binary-local. Rust's test harness
+//! has its own threads and may allocate while this test is running; a global
+//! process counter occasionally charged that bookkeeping to render call 1 on
+//! Linux. Tracking only the thread making the render call preserves the
+//! contract — every allocation reachable from render is on that thread —
+//! without measuring unrelated harness work.
 #![allow(unsafe_code, clippy::unwrap_used)]
 
 mod common;
@@ -20,9 +27,30 @@ mod common;
 use common::{Cell, SampleSpec, module, square};
 use play198x_core::engine::Engine;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell as ThreadCell;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static TRACKING: ThreadCell<bool> = const { ThreadCell::new(false) };
+    static ALLOCATIONS: ThreadCell<usize> = const { ThreadCell::new(0) };
+}
+
+fn record_allocation() {
+    TRACKING.with(|tracking| {
+        if tracking.get() {
+            ALLOCATIONS.with(|allocations| allocations.set(allocations.get() + 1));
+        }
+    });
+}
+
+fn start_counting() {
+    ALLOCATIONS.with(|allocations| allocations.set(0));
+    TRACKING.with(|tracking| tracking.set(true));
+}
+
+fn stop_counting() -> usize {
+    TRACKING.with(|tracking| tracking.set(false));
+    ALLOCATIONS.with(ThreadCell::get)
+}
 
 /// The system allocator, plus a tally of every request that hands out memory.
 struct Counting;
@@ -32,17 +60,17 @@ struct Counting;
 // is not read by the allocator, so it cannot affect allocation behaviour.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        record_allocation();
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        record_allocation();
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        record_allocation();
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 
@@ -59,6 +87,14 @@ static ALLOCATOR: Counting = Counting;
 /// binary-wide counter — see the module doc.
 #[test]
 fn rendering_allocates_nothing() {
+    // Prove the thread-local filter did not make the instrument blind before
+    // trusting a zero from it. `black_box` keeps the allocation observable to
+    // the optimiser; the value is deliberately non-zero-sized.
+    start_counting();
+    std::hint::black_box(vec![0u8; 64]);
+    let instrument_allocations = stop_counting();
+    assert_eq!(instrument_allocations, 1);
+
     engine_render_allocates_nothing();
     #[cfg(feature = "ay")]
     ay_render_allocates_nothing();
@@ -89,15 +125,14 @@ fn engine_render_allocates_nothing() {
     // exactly the bug this test is for: it would allocate once, on the audio
     // thread, in the worst possible place.
     for call in 1..=3 {
-        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        start_counting();
         let frames = engine.render(&mut buf);
-        let after = ALLOCATIONS.load(Ordering::Relaxed);
+        let allocations = stop_counting();
         assert_eq!(frames, 44_100);
         assert_eq!(
-            after - before,
-            0,
+            allocations, 0,
             "render call {call} made {} allocations; it must make none",
-            after - before
+            allocations
         );
     }
 }
@@ -136,16 +171,15 @@ fn ay_render_allocates_nothing() {
     // The first call is measured too: anything built lazily on first render
     // allocates once, on the audio thread, in the worst possible place.
     for call in 1..=3 {
-        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        start_counting();
         player.frame();
         let frames = player.render_frame(&mut buf);
-        let after = ALLOCATIONS.load(Ordering::Relaxed);
+        let allocations = stop_counting();
         assert_eq!(frames, 44_100 / 50);
         assert_eq!(
-            after - before,
-            0,
+            allocations, 0,
             "ay render call {call} made {} allocations; it must make none",
-            after - before
+            allocations
         );
     }
 }
