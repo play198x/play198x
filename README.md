@@ -6,19 +6,21 @@ Audio (SID, AY/YM, tracker formats), images (IFF/ILBM, C64 koala/hires, Spectrum
 
 ## Status — the core and the web player are live
 
-`play198x-core` is the published library underneath everything else: it opens a
-retro media file from a plain path, a ZIP or an Amiga ADF, identifies it from
-its bytes, and hands back an image or a module. Containers, PowerPacker
-decrunching, identification, image decoding, the ProTracker engine and the
-timing walk are all in.
+`play198x-core` 0.4.0 is the published library underneath everything else: it
+opens a retro media file from a plain path, a ZIP or an Amiga ADF, identifies
+it from its bytes, and hands back an image or something playable. Containers,
+PowerPacker decrunching, identification, image decoding, the ProTracker engine
+and ZX Spectrum `.ay` playback are all in. AY playback is behind the optional
+`ay` feature, so an image-only consumer acquires neither a Z80 nor a sound chip.
 
 `@play198x/web` is the WebAssembly build of that library, and
 [play198x.github.io](https://play198x.github.io) is a page that *is* the
 player: drop a file on it and it draws or plays in the browser. It reads ZX
-Spectrum SCREEN$, Commodore 64 Koala Paint and Art Studio, Amiga IFF ILBM and
-ProTracker MOD. SID and AY chiptunes need chip emulation that lives in Emu198x,
-whose chip crates are not published yet
-([emu198x/emu198x#1214](https://github.com/emu198x/emu198x/issues/1214)).
+Spectrum SCREEN$ and `.ay`, Commodore 64 Koala Paint and Art Studio, Amiga IFF
+ILBM, and ProTracker MOD. An `.ay` tune's own Z80 code runs against Emu198x's
+published CPU and AY crates on a ROM-free 128K Spectrum host, including its
+beeper, subtunes, memory paging and AY register reads. SID is the next
+code-driven audio slice and has not shipped.
 
 There is no desktop shell yet. It comes after the web one and is deliberately
 thin, the same way: anything a shell can do is an operation the core exposes,
