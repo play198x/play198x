@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/play198x/play198x/compare/play198x-core-v0.4.0...play198x-core-v0.4.1) - 2026-08-31
+
+### Added
+
+- add ROM-free PSID playback
+
 ## [0.4.0](https://github.com/play198x/play198x/compare/play198x-core-v0.3.0...play198x-core-v0.4.0) - 2026-08-30
 
 ### Added
