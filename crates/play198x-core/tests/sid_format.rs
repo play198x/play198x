@@ -23,6 +23,16 @@ fn psid(play: u16, body: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn rsid(body: &[u8]) -> Vec<u8> {
+    let mut bytes = psid(0, body);
+    bytes[0..4].copy_from_slice(b"RSID");
+    bytes[8..10].fill(0);
+    bytes[10..14].fill(0);
+    bytes[18..22].fill(0);
+    bytes[0x76..0x78].fill(0);
+    bytes
+}
+
 #[test]
 fn parses_header_metadata_timing_and_subtune_speed() {
     let bytes = psid(0x1001, &[0x60, 0x60]);
@@ -63,8 +73,54 @@ fn rejects_truncation_bad_counts_and_overflow_without_panicking() {
 
 #[test]
 fn identifies_but_parser_names_rsid_and_self_driven_policy_separately() {
-    let mut rsid = psid(0, &[0x60]);
-    rsid[0..4].copy_from_slice(b"RSID");
-    assert_eq!(format::parse(&rsid).unwrap().kind, Kind::Rsid);
+    assert_eq!(
+        format::parse(&rsid(&[0x00, 0x10, 0x60])).unwrap().kind,
+        Kind::Rsid
+    );
     assert_eq!(format::parse(&psid(0, &[0x60])).unwrap().play_address, 0);
+}
+
+#[test]
+fn rejects_rsid_fields_that_cannot_describe_a_real_c64_tune() {
+    let valid = rsid(&[0x00, 0x10, 0x60]);
+    for (range, value) in [
+        (8..10, 0x1000u16.to_be_bytes()),
+        (12..14, 0x1000u16.to_be_bytes()),
+    ] {
+        let mut malformed = valid.clone();
+        malformed[range].copy_from_slice(&value);
+        assert!(matches!(
+            format::parse(&malformed),
+            Err(SidError::InvalidHeader(_))
+        ));
+    }
+
+    let mut speed = valid.clone();
+    speed[18..22].copy_from_slice(&1u32.to_be_bytes());
+    assert!(matches!(
+        format::parse(&speed),
+        Err(SidError::InvalidHeader(_))
+    ));
+
+    let mut low_load = valid.clone();
+    low_load[0x7c..0x7e].copy_from_slice(&0x07e7u16.to_le_bytes());
+    assert!(matches!(
+        format::parse(&low_load),
+        Err(SidError::InvalidHeader(_))
+    ));
+
+    let mut rom_init = valid.clone();
+    rom_init[10..12].copy_from_slice(&0xa000u16.to_be_bytes());
+    assert!(matches!(
+        format::parse(&rom_init),
+        Err(SidError::InvalidHeader(_))
+    ));
+
+    let mut basic_with_init = valid;
+    basic_with_init[10..12].copy_from_slice(&0x1000u16.to_be_bytes());
+    basic_with_init[0x76..0x78].copy_from_slice(&2u16.to_be_bytes());
+    assert!(matches!(
+        format::parse(&basic_with_init),
+        Err(SidError::InvalidHeader(_))
+    ));
 }

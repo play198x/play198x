@@ -82,8 +82,8 @@ impl std::fmt::Display for SidError {
             Self::Truncated => f.write_str("truncated SID header or data"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported SID version {v}"),
             Self::InvalidHeader(what) => write!(f, "invalid SID header: {what}"),
-            Self::RsidNotSupported => f.write_str("RSID needs a C64 environment and is not supported by the ROM-free player"),
-            Self::SelfDrivenNotSupported => f.write_str("a zero play address is self-driven and is not supported by the callable PSID player"),
+            Self::RsidNotSupported => f.write_str("RSID requires a power-on C64 machine; use Emu198x rather than the ROM-free media host"),
+            Self::SelfDrivenNotSupported => f.write_str("a zero play address requires hardware-driven interrupts; use Emu198x rather than the callable PSID host"),
             Self::UnsupportedFeature(what) => write!(f, "this SID file needs unsupported {what}"),
             Self::NoSuchSong => f.write_str("the SID file has no such subtune"),
             Self::AddressOverflow => f.write_str("the SID payload does not fit in 64 KiB of C64 memory"),
@@ -153,15 +153,20 @@ pub fn parse(bytes: &[u8]) -> Result<SidFile, SidError> {
     }
     let flags = if version >= 2 { be16(bytes, 0x76)? } else { 0 };
     let init = be16(bytes, 0x0a)?;
+    let play = be16(bytes, 0x0c)?;
+    let speed = be32(bytes, 0x12)?;
+    if kind == Kind::Rsid {
+        validate_rsid(stored_load, load_address, init, play, speed, flags)?;
+    }
     Ok(SidFile {
         kind,
         version,
         load_address,
         init_address: if init == 0 { load_address } else { init },
-        play_address: be16(bytes, 0x0c)?,
+        play_address: play,
         songs,
         start_song,
-        speed_bits: be32(bytes, 0x12)?,
+        speed_bits: speed,
         title: text(&bytes[0x16..0x36]),
         author: text(&bytes[0x36..0x56]),
         released: text(&bytes[0x56..0x76]),
@@ -181,6 +186,44 @@ pub fn parse(bytes: &[u8]) -> Result<SidFile, SidError> {
         third_sid_address: if version >= 4 { bytes[0x7b] } else { 0 },
         data: body.to_vec(),
     })
+}
+
+fn validate_rsid(
+    stored_load: u16,
+    load: u16,
+    init: u16,
+    play: u16,
+    speed: u32,
+    flags: u16,
+) -> Result<(), SidError> {
+    if stored_load != 0 {
+        return Err(SidError::InvalidHeader(
+            "RSID load address field must be zero",
+        ));
+    }
+    if play != 0 {
+        return Err(SidError::InvalidHeader("RSID play address must be zero"));
+    }
+    if speed != 0 {
+        return Err(SidError::InvalidHeader("RSID speed field must be zero"));
+    }
+    if load < 0x07e8 {
+        return Err(SidError::InvalidHeader(
+            "RSID effective load address must be at least $07E8",
+        ));
+    }
+    if flags & 2 != 0 && init != 0 {
+        return Err(SidError::InvalidHeader(
+            "RSID C64 BASIC tunes must have a zero init address",
+        ));
+    }
+    let effective_init = if init == 0 { load } else { init };
+    if !matches!(effective_init, 0x07e8..=0x9fff | 0xc000..=0xcfff) {
+        return Err(SidError::InvalidHeader(
+            "RSID init address must be in RAM outside the reserved low-memory area",
+        ));
+    }
+    Ok(())
 }
 
 fn be16(bytes: &[u8], at: usize) -> Result<u16, SidError> {

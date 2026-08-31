@@ -72,6 +72,35 @@ fn callable_psid_sample_preserves_the_rom_free_baseline() {
     );
 }
 
+#[test]
+#[ignore = "needs the local HVSC #85 corpus"]
+fn self_driven_files_reach_their_deliberate_typed_boundary() {
+    let root = std::env::var_os("PLAY198X_HVSC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/private/tmp/play198x-hvsc85/C64Music"));
+    let mut paths = Vec::new();
+    collect_sid_paths(&root, &mut paths);
+    paths.sort();
+
+    let mut rsid = 0usize;
+    let mut self_driven_psid = 0usize;
+    for path in paths {
+        let bytes = std::fs::read(&path).expect("HVSC entry should be readable");
+        match SidPlayer::new(&bytes, 0, 8_000) {
+            Err(SidError::RsidNotSupported) => rsid += 1,
+            Err(SidError::SelfDrivenNotSupported) => self_driven_psid += 1,
+            _ => {}
+        }
+    }
+
+    println!("HVSC self-driven boundary: RSID={rsid} PSID-play-zero={self_driven_psid}");
+    assert_eq!(rsid, 3_924, "HVSC #85 RSID census changed");
+    assert_eq!(
+        self_driven_psid, 111,
+        "HVSC #85 zero-play-address PSID census changed"
+    );
+}
+
 fn collect_sid_paths(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
