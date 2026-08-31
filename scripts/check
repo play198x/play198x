@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# The single build contract for both Cargo trees in this repository.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+web_manifest="crates/play198x-web/Cargo.toml"
+web_lockfile="crates/play198x-web/Cargo.lock"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/check [all|format|lint-workspace|test-workspace|lockfile|test-shell|lint-shell|build-shell|prepare]
+
+  all             Run every check and build both WebAssembly targets (default).
+  format          Check formatting in the workspace and excluded web shell.
+  lint-workspace  Lint the workspace with default and ay feature sets.
+  test-workspace  Test the workspace with default and ay feature sets.
+  lockfile        Prove the excluded web shell lockfile is current.
+  test-shell      Run the web shell's wasm-bindgen tests under Node.
+  lint-shell      Lint the excluded web shell.
+  build-shell     Build the web shell for Node and browsers.
+  prepare         Format both trees and refresh their path-dependency lock entries.
+EOF
+}
+
+format() {
+  cargo fmt --all --check
+  cargo fmt --manifest-path "$web_manifest" --check
+}
+
+lint_workspace() {
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo clippy --workspace --all-targets --features ay -- -D warnings
+}
+
+test_workspace() {
+  cargo test --workspace
+  cargo test --workspace --features ay
+}
+
+check_lockfile() {
+  if ! cargo fetch --manifest-path "$web_manifest" --locked; then
+    echo "error: $web_lockfile is stale; run scripts/check prepare" >&2
+    return 1
+  fi
+  git diff --exit-code -- "$web_lockfile"
+}
+
+test_shell() {
+  wasm-pack test --node crates/play198x-web
+}
+
+lint_shell() {
+  cargo clippy --manifest-path "$web_manifest" --all-targets -- -D warnings
+}
+
+build_shell() {
+  wasm-pack build crates/play198x-web --target nodejs --out-dir pkg-node
+  wasm-pack build crates/play198x-web --target web --out-dir pkg-web
+  for package in pkg-node pkg-web; do
+    if [[ ! -f "crates/play198x-web/$package/LICENSE" ]]; then
+      echo "error: the generated $package package does not contain its GPL license" >&2
+      return 1
+    fi
+  done
+}
+
+prepare() {
+  cargo fmt --all
+  cargo fmt --manifest-path "$web_manifest"
+  # These are deliberately targeted: preparing a change must not smuggle an
+  # unrelated transitive dependency refresh into its lockfile diff.
+  cargo update -p play198x-core --manifest-path "$web_manifest"
+  cargo update -p play198x-web --manifest-path "$web_manifest"
+}
+
+command="${1:-all}"
+case "$command" in
+  all)
+    format
+    lint_workspace
+    test_workspace
+    check_lockfile
+    test_shell
+    lint_shell
+    build_shell
+    ;;
+  format) format ;;
+  lint-workspace) lint_workspace ;;
+  test-workspace) test_workspace ;;
+  lockfile) check_lockfile ;;
+  test-shell) test_shell ;;
+  lint-shell) lint_shell ;;
+  build-shell) build_shell ;;
+  prepare) prepare ;;
+  -h|--help|help) usage ;;
+  *)
+    echo "error: unknown command: $command" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
