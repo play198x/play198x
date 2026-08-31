@@ -50,7 +50,7 @@ fn mapped_rom_read_is_a_typed_refusal_but_banked_ram_is_not() {
 
 #[test]
 fn rsid_self_driven_and_missing_subtune_are_named() {
-    let mut rsid = psid(0x1000, 0, 0x1000, &[0x60]);
+    let mut rsid = psid(0x1000, 0, 0, &[0x00, 0x10, 0x60]);
     rsid[0..4].copy_from_slice(b"RSID");
     assert!(matches!(
         SidPlayer::new(&rsid, 0, 48_000),
