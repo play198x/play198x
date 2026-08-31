@@ -1,0 +1,56 @@
+name: Web release
+
+on:
+  pull_request:
+    paths:
+      - "crates/play198x-web/Cargo.toml"
+      - "crates/play198x-web/src/**"
+      - "crates/play198x-web/CHANGELOG.md"
+      - "scripts/check-web-release.py"
+      - ".github/workflows/web-release.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/play198x-web/Cargo.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    if: github.event_name == 'pull_request'
+    name: Web changes carry a release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check version and changelog
+        run: python3 scripts/check-web-release.py --self-test --base "$BASE_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+  tag:
+    if: github.event_name == 'push'
+    name: Tag reviewed web release
+    runs-on: ubuntu-latest
+    steps:
+      # A PAT is intentional: tags pushed with GITHUB_TOKEN do not trigger the
+      # npm workflow. This is the same narrowly scoped token release-plz uses
+      # to ensure its generated release PR receives CI.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - name: Tag the manifest version when it is new
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^version = / { print $2; exit }' crates/play198x-web/Cargo.toml)"
+          tag="play198x-web-v${version}"
+          grep -Fq "## [${version}]" crates/play198x-web/CHANGELOG.md
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "already tagged: ${tag}"
+            exit 0
+          fi
+          git tag -a "$tag" -m "play198x-web ${version}"
+          git push origin "$tag"
