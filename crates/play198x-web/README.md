@@ -12,6 +12,7 @@ player for vintage formats.
 | Format | Machine |
 |---|---|
 | SCREEN$ (`.scr`) | ZX Spectrum |
+| ZXAY/EMUL (`.ay`) | ZX Spectrum 128K |
 | Koala Painter | Commodore 64 |
 | Advanced Art Studio | Commodore 64 |
 | ILBM / IFF | Commodore Amiga |
@@ -45,7 +46,8 @@ image.free();
 ```
 
 `free()` isn't cleanup you can skip. Every object this package hands back —
-`Probed`, `DecodedImage`, `ImageMeta`, `Container`, `ModulePlayer` — holds
+`Probed`, `DecodedImage`, `ImageMeta`, `ModuleMeta`, `AyMeta`, `Container`,
+`Player` — holds
 `wasm-bindgen`-managed memory on the wasm side, and JavaScript's garbage
 collector cannot see it: it only knows about the small JS object wrapping a
 pointer, not what that pointer holds in linear memory. Call `free()` once you
@@ -105,12 +107,18 @@ the bytes you hand it, so it cannot undo an oversized `Uint8Array` your own code
 already allocated to build them. Refuse a huge `File` before reading it, rather
 than after.
 
-### Playing a module
+### Playing audio
 
-`ModulePlayer` wraps a decoded ProTracker module and a running transport. It is
-built for an `AudioWorkletProcessor`: construct it once inside the worklet,
-then call `render` from `process()` — called roughly every 2.7 ms at 48 kHz,
-128 frames (`ModulePlayer.renderQuantum()`) at a time.
+`Player` wraps either a decoded ProTracker module or a ZX Spectrum `.ay` tune
+behind one transport. It is built for an `AudioWorkletProcessor`: construct it
+once inside the worklet, then call `render` from `process()` — called roughly
+every 2.7 ms at 48 kHz, 128 frames (`Player.renderQuantum()`) at a time.
+
+The constructor's `song` argument selects an `.ay` subtune; modules ignore it.
+Use `ayMeta(bytes)` before constructing the player to read the tune's author,
+notes, song count, song names, and each song's declared play and fade lengths.
+Choosing another `.ay` song constructs a new player because each song is a
+separate Z80 entry point, not a seek position.
 
 **`render` takes no buffer and returns no samples.** A version that did —
 `render(outputBuffer)` — reads as allocation-free in Rust, but the JS glue
@@ -119,19 +127,23 @@ buffer, copies your array in, calls the wasm function, copies the result back
 out, and frees the buffer: a malloc, two copies and a free, every single
 call, on the audio-rendering thread — the exact failure the engine's
 allocation-free design exists to prevent, reintroduced one layer up. Instead,
-`ModulePlayer` owns its output buffers itself. `render()` fills them in
+`Player` owns its output buffers itself. `render()` fills them in
 place; you read them through a `Float32Array` **view** over wasm memory, built
 once and reused, so nothing crosses the JS↔wasm boundary on a steady-state
 call but a frame count in and a frame count out — no allocation, no copy:
 
 ```js
-import init, { ModulePlayer, wasmMemory } from '@play198x/web';
+import init, { Player, ayMeta, wasmMemory } from '@play198x/web';
 
 await init();
 
 const bytes = new Uint8Array(await file.arrayBuffer());
-const player = new ModulePlayer(bytes, sampleRate);
-const quantum = ModulePlayer.renderQuantum(); // 128
+const meta = ayMeta(bytes); // only for .ay; use moduleMeta for a module
+console.log(meta.author, meta.songCount(), meta.songName(0));
+meta.free();
+
+const player = new Player(bytes, 0, sampleRate);
+const quantum = Player.renderQuantum(); // 128
 
 // Build once. See "Views detach when memory grows" below for when you
 // must not just hold onto these forever.
@@ -152,10 +164,13 @@ outputs[0][0].set(left.subarray(0, rendered));
 outputs[0][1].set(right.subarray(0, rendered));
 
 // Later, from the main thread via a message to the worklet:
-player.set_playing(false); // pauses; render keeps filling with silence
-player.seek_order(4); // jumps to order 4, clamped to the song's length
-
-console.log(player.order, player.pattern, player.row, player.tick);
+player.setPlaying(false); // pauses; render keeps filling with silence
+if (player.positionKind() === 'module') {
+  player.seekOrder(4); // modules only; returns false for .ay
+  console.log(player.order, player.pattern, player.row, player.tick);
+} else {
+  console.log(player.song, player.frame); // frame-driven .ay position
+}
 
 player.free();
 ```
@@ -186,10 +201,10 @@ worklet's output. Web Audio pre-zeroes every render quantum's output buffers
 before calling `process()`, so a `set()` that silently writes nothing leaves
 those pre-zeroed buffers exactly as they were — the audible result is
 silence, not garbage, but it is still wrong output from a caller's
-perspective that thinks it just wrote real samples. `ModulePlayer`'s own
+perspective that thinks it just wrote real samples. `Player`'s own
 buffers never cause this (`render` never reallocates them), but *another*
 allocation in the same wasm instance can: decoding bytes for a second
-`ModulePlayer` in the same worklet, for one. `wasm-bindgen` cannot stop
+`Player` in the same worklet, for one. `wasm-bindgen` cannot stop
 memory from growing, so neither can this package — the fix is the reference
 check in the example above: compare `view.buffer` against a fresh
 `wasmMemory().buffer`, and rebuild the view when they differ. That comparison
