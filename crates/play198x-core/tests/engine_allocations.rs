@@ -98,6 +98,50 @@ fn rendering_allocates_nothing() {
     engine_render_allocates_nothing();
     #[cfg(feature = "ay")]
     ay_render_allocates_nothing();
+    #[cfg(feature = "sid")]
+    sid_render_allocates_nothing();
+}
+
+#[cfg(feature = "sid")]
+fn sid_render_allocates_nothing() {
+    use play198x_core::player::pump::FrameSource;
+    use play198x_core::player::sid::SidPlayer;
+
+    // Callable PSID: init returns; play writes a saw voice then returns.
+    let code = [
+        0x60, // RTS
+        0xa9, 0x00, 0x8d, 0x00, 0xd4, // frequency low
+        0xa9, 0x10, 0x8d, 0x01, 0xd4, // frequency high
+        0xa9, 0x21, 0x8d, 0x04, 0xd4, // saw + gate
+        0xa9, 0xf0, 0x8d, 0x05, 0xd4, // attack/decay
+        0xa9, 0xf0, 0x8d, 0x06, 0xd4, // sustain/release
+        0xa9, 0x0f, 0x8d, 0x18, 0xd4, // volume
+        0x60, // RTS
+    ];
+    let mut bytes = vec![0u8; 0x7c];
+    bytes[0..4].copy_from_slice(b"PSID");
+    bytes[4..6].copy_from_slice(&2u16.to_be_bytes());
+    bytes[6..8].copy_from_slice(&0x7cu16.to_be_bytes());
+    bytes[8..10].copy_from_slice(&0x1000u16.to_be_bytes());
+    bytes[10..12].copy_from_slice(&0x1000u16.to_be_bytes());
+    bytes[12..14].copy_from_slice(&0x1001u16.to_be_bytes());
+    bytes[14..16].copy_from_slice(&1u16.to_be_bytes());
+    bytes[16..18].copy_from_slice(&1u16.to_be_bytes());
+    bytes.extend_from_slice(&code);
+
+    let mut player = SidPlayer::new(&bytes, 0, 44_100).unwrap();
+    let mut buf = vec![0f32; 44_100 / 50 * 2];
+    for call in 1..=3 {
+        start_counting();
+        player.frame().unwrap();
+        let frames = player.render_frame(&mut buf);
+        let allocations = stop_counting();
+        assert_eq!(frames, 44_100 / 50);
+        assert_eq!(
+            allocations, 0,
+            "sid render call {call} made {allocations} allocations; it must make none"
+        );
+    }
 }
 
 fn engine_render_allocates_nothing() {

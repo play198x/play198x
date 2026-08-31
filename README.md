@@ -10,17 +10,19 @@ Audio (SID, AY/YM, tracker formats), images (IFF/ILBM, C64 koala/hires, Spectrum
 opens a retro media file from a plain path, a ZIP or an Amiga ADF, identifies
 it from its bytes, and hands back an image or something playable. Containers,
 PowerPacker decrunching, identification, image decoding, the ProTracker engine
-and ZX Spectrum `.ay` playback are all in. AY playback is behind the optional
-`ay` feature, so an image-only consumer acquires neither a Z80 nor a sound chip.
+and ZX Spectrum `.ay` plus ROM-free callable PSID playback are all in. AY and
+SID have separate optional features, so an image-only consumer acquires no CPU
+or sound chip.
 
 `@play198x/web` is the WebAssembly build of that library, and
 [play198x.github.io](https://play198x.github.io) is a page that *is* the
 player: drop a file on it and it draws or plays in the browser. It reads ZX
-Spectrum SCREEN$ and `.ay`, Commodore 64 Koala Paint and Art Studio, Amiga IFF
+Spectrum SCREEN$ and `.ay`, Commodore 64 Koala Paint, Art Studio and PSID, Amiga IFF
 ILBM, and ProTracker MOD. An `.ay` tune's own Z80 code runs against Emu198x's
 published CPU and AY crates on a ROM-free 128K Spectrum host, including its
-beeper, subtunes, memory paging and AY register reads. SID is the next
-code-driven audio slice and has not shipped.
+beeper, subtunes, memory paging and AY register reads. A callable PSID's 6502
+code runs against Emu198x's SID core; RSID, self-driven, multi-SID and
+ROM-dependent tunes are identified and explicitly declined.
 
 There is no desktop shell yet. It comes after the web one and is deliberately
 thin, the same way: anything a shell can do is an operation the core exposes,

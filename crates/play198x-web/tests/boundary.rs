@@ -150,6 +150,19 @@ fn ay_header() -> Vec<u8> {
     bytes
 }
 
+fn sid_header() -> Vec<u8> {
+    let mut bytes = vec![0; 0x76];
+    bytes[0..4].copy_from_slice(b"PSID");
+    bytes
+}
+
+#[wasm_bindgen_test]
+fn a_sid_file_crosses_the_probe_boundary_by_name() {
+    let probed = play198x_web::probe(&sid_header()).expect("a full-length PSID header");
+    assert_eq!(probed.format(), "sid");
+    assert_eq!(probed.confidence(), "certain");
+}
+
 #[wasm_bindgen_test]
 fn an_ay_file_probes_as_certain_even_though_this_shell_cannot_play_it() {
     let probed = play198x_web::probe(&ay_header()).expect("a full-length ZXAY/EMUL header");

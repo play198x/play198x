@@ -443,17 +443,13 @@ fn bounded(
 /// Map the ADF crate's errors onto this crate's, keeping the distinctions that
 /// matter to a reader looking at a disk that will not open.
 ///
-/// The crate has no dedicated "carries no filesystem" variant: a disk whose
-/// boot block does not begin `DOS` comes back as `Corrupt` carrying that exact
-/// `what`. Matching the string is the only discriminator on offer, and this
-/// distinction is the whole reason the mapping exists, so it is matched
-/// deliberately rather than folded in with real corruption. The test
-/// `a_bootblock_disk_is_not_a_corrupt_adf` pins it, so an upgrade that reworded
-/// the string would fail a test rather than quietly reclassify every non-DOS
-/// disk as damage.
+/// Current ADF releases expose a dedicated `NotAFilesystem` variant. Keep the
+/// older `Corrupt { what: "boot-block signature" }` mapping as well so the
+/// public distinction survives across the full compatible 0.3 release line.
 fn from_adf(err: format198x_commodore_amiga_adf::Error) -> Error {
     use format198x_commodore_amiga_adf::Error as Adf;
     match err {
+        Adf::NotAFilesystem => Error::NotAFilesystem,
         Adf::Corrupt {
             what: "boot-block signature",
         } => Error::NotAFilesystem,

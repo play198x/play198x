@@ -24,6 +24,8 @@ pub mod pump;
 
 #[cfg(feature = "ay")]
 pub mod ay;
+#[cfg(feature = "sid")]
+pub mod sid;
 
 use crate::engine::ModulePosition;
 

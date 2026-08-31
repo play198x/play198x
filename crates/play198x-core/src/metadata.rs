@@ -53,6 +53,21 @@ pub enum Metadata {
     /// rather than getting to skip it because the feature that would fill
     /// it in happened to be off.
     Ay(AyMeta),
+    /// A Commodore SID tune container. Playback may still be declined when it
+    /// is RSID, self-driven, or proves that it needs a mapped ROM.
+    Sid(SidMeta),
+}
+
+/// What a PSID/RSID header says about its work and subtunes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SidMeta {
+    pub title: String,
+    pub author: String,
+    pub released: String,
+    pub songs: u16,
+    /// Zero-based default subtune index for the public player API.
+    pub start_song: usize,
 }
 
 /// What a ProTracker module says about itself.
@@ -222,6 +237,18 @@ pub fn ay_meta(file: &crate::player::ay::format::AyFile) -> AyMeta {
                 fade_frames: song.fade_frames,
             })
             .collect(),
+    }
+}
+
+#[cfg(feature = "sid")]
+#[must_use]
+pub fn sid_meta(file: &crate::player::sid::format::SidFile) -> SidMeta {
+    SidMeta {
+        title: file.title.clone(),
+        author: file.author.clone(),
+        released: file.released.clone(),
+        songs: file.songs,
+        start_song: usize::from(file.start_song.saturating_sub(1)),
     }
 }
 

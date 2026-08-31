@@ -14,8 +14,8 @@ Usage: scripts/check [all|format|lint-workspace|test-workspace|lockfile|test-she
 
   all             Run every check and build both WebAssembly targets (default).
   format          Check formatting in the workspace and excluded web shell.
-  lint-workspace  Lint the workspace with default and ay feature sets.
-  test-workspace  Test the workspace with default and ay feature sets.
+  lint-workspace  Lint the workspace with default and all feature sets.
+  test-workspace  Test the workspace with default and all feature sets.
   lockfile        Prove the excluded web shell lockfile is current.
   test-shell      Run the web shell's wasm-bindgen tests under Node.
   lint-shell      Lint the excluded web shell.
@@ -31,12 +31,12 @@ format() {
 
 lint_workspace() {
   cargo clippy --workspace --all-targets -- -D warnings
-  cargo clippy --workspace --all-targets --features ay -- -D warnings
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
 }
 
 test_workspace() {
   cargo test --workspace
-  cargo test --workspace --features ay
+  cargo test --workspace --all-features
 }
 
 check_lockfile() {

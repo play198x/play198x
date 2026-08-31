@@ -12,6 +12,7 @@
 //! | ProTracker | a recognised magic at offset 1080 | [`Confidence::Certain`] |
 //! | ILBM | `FORM` at 0 and `ILBM` at 8 | [`Confidence::Certain`] |
 //! | `.ay` | `ZXAY` at 0, `EMUL` at 4, and at least [`AY_MIN_LEN`] bytes | [`Confidence::Certain`] |
+//! | PSID/RSID | `PSID` or `RSID` at 0 and at least [`SID_MIN_LEN`] bytes | [`Confidence::Certain`] |
 //! | Koala | load address `0x6000` **and** length 10,003 | [`Confidence::Certain`] |
 //! | Art Studio | load address `0x2000` **and** length 9,002..=9,009 | [`Confidence::Probable`] |
 //! | SCR | length exactly 6,912, and nothing above matched | [`Confidence::Probable`] |
@@ -76,6 +77,9 @@ pub enum Format {
     /// sound chip — so this variant and the rule below are not behind the
     /// `ay` feature that its player and its host are; see `player::ay`.
     Ay,
+    /// Commodore SID tune container. Identification is always available;
+    /// callable playback is behind the optional `sid` feature.
+    Sid,
 }
 
 /// How much the evidence behind an identification is worth.
@@ -102,6 +106,10 @@ pub enum Confidence {
 /// the `.ay` rule itself is not gated — see this module's note on naming a
 /// format without acquiring a Z80 to do it.
 pub const AY_MIN_LEN: usize = 20;
+
+/// Shortest complete SID v1 header. Later versions carry six more bytes, but
+/// their parser validates that after identification has named the container.
+pub const SID_MIN_LEN: usize = 0x76;
 
 /// Work out what `bytes` are.
 ///
@@ -135,6 +143,10 @@ pub fn identify(bytes: &[u8]) -> Option<(Format, Confidence)> {
     // confidence system exists to avoid.
     if bytes.len() >= AY_MIN_LEN && &bytes[0..4] == b"ZXAY" && &bytes[4..8] == b"EMUL" {
         return Some((Format::Ay, Confidence::Certain));
+    }
+
+    if bytes.len() >= SID_MIN_LEN && matches!(&bytes[0..4], b"PSID" | b"RSID") {
+        return Some((Format::Sid, Confidence::Certain));
     }
 
     // Two independent facts each. A C64 file's first two bytes are the load

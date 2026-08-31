@@ -31,6 +31,12 @@ fn ay_header() -> Vec<u8> {
     bytes
 }
 
+fn sid_header() -> Vec<u8> {
+    let mut bytes = vec![0; 0x76];
+    bytes[0..4].copy_from_slice(b"PSID");
+    bytes
+}
+
 /// A four-channel `M.K.` module: one square-wave sample, one pattern, a C-2 on
 /// channel 0 at row 0. The shape is the MOD crate's own test fixture, so what
 /// `probe` accepts is what that crate can actually decode.
@@ -293,10 +299,11 @@ fn a_uniform_sweep_reaches_every_rule_once_the_signals_are_real() {
     // The counterpart to the sweep above: the same shape of loop over fixtures
     // that do carry the signals, so all six rules are pinned to a positive
     // identification rather than only the one a uniform fill can reach.
-    let cases: [(Vec<u8>, Format, Confidence); 6] = [
+    let cases: [(Vec<u8>, Format, Confidence); 7] = [
         (synthetic_module(), Format::ProTracker, Confidence::Certain),
         (synthetic_ilbm(32, 16), Format::Ilbm, Confidence::Certain),
         (ay_header(), Format::Ay, Confidence::Certain),
+        (sid_header(), Format::Sid, Confidence::Certain),
         (synthetic_koala(), Format::Koala, Confidence::Certain),
         (
             synthetic_art_studio(format198x_commodore_c64_art_studio::FILE_LEN),
