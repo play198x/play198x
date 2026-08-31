@@ -27,6 +27,10 @@ Open replacement ROMs do not extend that callable slice; the measured benefit
 does not justify a firmware distribution surface or output that cannot be
 claimed compatible with an original C64. See the
 [decision record](decisions/open-roms-do-not-extend-callable-sid-playback.md).
+Self-driven SID remains the emulator's job: RSID and zero-play-address PSID
+require continuously scheduled C64 interrupt hardware, not another callable
+media routine. The [self-driven SID decision](decisions/self-driven-sid-belongs-to-a-c64-emulator.md)
+records the corpus and reference-player evidence.
 
 There is no desktop shell yet. It comes after the web one and is deliberately
 thin, the same way: anything a shell can do is an operation the core exposes,
