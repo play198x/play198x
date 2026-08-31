@@ -1,6 +1,7 @@
 name: Web release
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "crates/play198x-web/Cargo.toml"
@@ -31,7 +32,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
   tag:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     name: Tag reviewed web release
     runs-on: ubuntu-latest
     steps:
