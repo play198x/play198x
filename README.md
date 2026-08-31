@@ -31,4 +31,16 @@ and the [website design](https://github.com/play198x/docs/blob/main/specs/2026-0
 
 A guiding rule: Play198x is a **thin consumer of Emu198x's chip and CPU cores** (SID/AY/Paula/VIC, 6502/Z80) for the formats that need a player, and decodes pure-data formats (IFF/SCR images) directly. It never reimplements chip emulation.
 
+## Building and checking
+
+The web shell is deliberately excluded from the root Cargo workspace, so a
+plain workspace command does not cover the whole repository. Run
+`scripts/check` to apply the same format, lint, test, lockfile and WebAssembly
+build contract as CI to both Cargo trees. It requires `wasm-pack` and the
+`wasm32-unknown-unknown` Rust target.
+
+Before committing, `scripts/check prepare` formats both trees and refreshes the
+web shell's path-dependency lock entries without updating unrelated transitive
+dependencies. Individual CI-sized phases are listed by `scripts/check --help`.
+
 Play198x is the media player/viewer sibling in the 198x family. Its boundary is governed by `198x/decisions/play198x-media-player.md`.

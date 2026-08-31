@@ -33,7 +33,7 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: scripts/check format
 
   clippy:
     name: Clippy
@@ -58,14 +58,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # Default-features-off is checked above; this is its counterpart. The
-      # `ay` feature's Z80/AY-chip player and Spectrum host (`player`,
-      # `host`) are entirely invisible to the run above — a lint only that
-      # feature could trip would ship unnoticed without this step.
-      - name: Run Clippy (ay feature)
-        run: cargo clippy --workspace --all-targets --features ay -- -D warnings
+        run: scripts/check lint-workspace
 
   # Cross-platform test: the crate decodes bytes and renders audio to fixed
   # numbers, and the tests assert those numbers, so they must run on every host
@@ -100,16 +93,7 @@ jobs:
           shared-key: test-${{ matrix.os }}
 
       - name: Test workspace
-        run: cargo test --workspace
-
-      # Proving the crate still builds and passes *without* `ay` is half of
-      # what an optional feature is for — that is what the step above
-      # already does, and it must keep doing exactly that. This is the other
-      # half: every test behind `#[cfg(feature = "ay")]` (the Spectrum host,
-      # the AY player, `.ay` parsing) is otherwise never compiled, let alone
-      # run, by this workflow.
-      - name: Test workspace (ay feature)
-        run: cargo test --workspace --features ay
+        run: bash scripts/check test-workspace
 
   # `play198x-web` is excluded from the workspace (see the root Cargo.toml), so
   # none of the jobs above ever build, test, or lint it. Without this job the
@@ -156,30 +140,15 @@ jobs:
       # ordinary Amiga data disks as corrupt. Both crates built, every test
       # passed, and the only sign was a dirty lockfile after a local build.
       - name: The shell's lockfile must not lag its dependencies
-        run: |
-          set -euo pipefail
-          cargo fetch --manifest-path crates/play198x-web/Cargo.toml --locked || {
-            echo "::error::crates/play198x-web/Cargo.lock is stale — run: cargo update --manifest-path crates/play198x-web/Cargo.toml"
-            exit 1
-          }
-          git diff --exit-code crates/play198x-web/Cargo.lock
+        run: scripts/check lockfile
 
       - name: Test the shell
-        run: wasm-pack test --node crates/play198x-web
+        run: scripts/check test-shell
 
       - name: Clippy the shell
-        run: cargo clippy --manifest-path crates/play198x-web/Cargo.toml --all-targets -- -D warnings
-
-      # `cargo fmt --all --check` in the `fmt` job only sees workspace members,
-      # and this crate is excluded from the workspace — so without this step
-      # it has no formatting gate at all.
-      - name: Check shell formatting
-        run: cargo fmt --manifest-path crates/play198x-web/Cargo.toml --check
+        run: scripts/check lint-shell
 
       # Both targets are built so the browser target cannot rot: it has no
       # consumer yet, and nothing else would notice it breaking.
-      - name: Build the nodejs target
-        run: wasm-pack build crates/play198x-web --target nodejs --out-dir pkg-node
-
-      - name: Build the web target
-        run: wasm-pack build crates/play198x-web --target web --out-dir pkg-web
+      - name: Build both shell targets
+        run: scripts/check build-shell
