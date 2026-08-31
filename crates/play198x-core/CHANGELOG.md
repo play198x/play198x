@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/play198x/play198x/compare/play198x-core-v0.4.1...play198x-core-v0.4.2) - 2026-08-31
+
+### Fixed
+
+- *(core)* validate RSID header constraints ([#53](https://github.com/play198x/play198x/pull/53))
+
 ### Fixed
 
 - validate RSID-only reserved fields and RAM address constraints before applying
