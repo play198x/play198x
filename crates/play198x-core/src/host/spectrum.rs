@@ -37,7 +37,7 @@ const PAGING_DECODE_MATCH: u16 = 0x0000;
 
 /// The address lines the AY's register-select port decodes: A15 and A14
 /// high, A1 low, i.e. `(port & 0xC002) == 0xC000` — `$FFFD` and `$DFFD`
-/// (`syntheses/zx-spectrum/128k-extras.md`, § I/O ports).
+/// (`syntheses/sinclair-zx-spectrum/128k-extras.md`, § I/O ports).
 ///
 /// Named rather than written twice: a write here selects a register and a
 /// read here reads that register back, so both paths must agree, and two
