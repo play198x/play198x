@@ -30,7 +30,7 @@ repository.workspace = true
 # reads, and the test writer asks for `CompressionMethod::Deflated`, which
 # flate2 handles. Naming the one backend drops `zopfli`, `bumpalo` and `log`
 # from every consumer's graph.
-zip = { version = "8", default-features = false, features = [
+zip = { version = "9", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
 
