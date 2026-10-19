@@ -31,6 +31,7 @@ jobs:
   publish:
     name: Publish @play198x/web
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       # Mandatory for trusted publishing: this is what mints the OIDC token npm
