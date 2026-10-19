@@ -1,0 +1,20 @@
+name: PR title
+
+# The checks are shared by every 198x repo (stevehill1981/198x-workflows): the
+# title and every commit subject must be conventional commits. `edited`
+# re-runs them when only the title changes.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    name: PR title
+    uses: stevehill1981/198x-workflows/.github/workflows/pr-title.yml@v1
