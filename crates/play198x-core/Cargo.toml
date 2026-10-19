@@ -37,7 +37,7 @@ zip = { version = "8", default-features = false, features = [
 # AY-3-8910 chip emulation and Z80 CPU for the `ay` feature. Off by default: a
 # consumer decoding a SCREEN$ should not acquire a Z80 and sound chip just to
 # render an image.
-emu198x-zilog-z80 = { version = "0.6", optional = true }
+emu198x-zilog-z80 = { version = "0.8", optional = true }
 emu198x-gi-ay-3-8910 = { version = "0.6", optional = true }
 emu198x-mos-6502 = { version = "0.6", optional = true }
 emu198x-mos-sid-6581 = { version = "0.7", optional = true }
