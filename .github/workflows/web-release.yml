@@ -17,11 +17,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: web-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   contract:
     if: github.event_name == 'pull_request'
     name: Web changes carry a release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -35,6 +40,7 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     name: Tag reviewed web release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       # A PAT is intentional: tags pushed with GITHUB_TOKEN do not trigger the
       # npm workflow. This is the same narrowly scoped token release-plz uses

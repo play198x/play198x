@@ -7,11 +7,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   changelog-version:
     name: Released versions have changelog entries
     if: startsWith(github.event.pull_request.title, 'chore') && contains(github.event.pull_request.title, 'release')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
