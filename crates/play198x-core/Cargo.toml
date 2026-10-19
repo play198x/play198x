@@ -40,7 +40,7 @@ zip = { version = "8", default-features = false, features = [
 emu198x-zilog-z80 = { version = "0.8", optional = true }
 emu198x-gi-ay-3-8910 = { version = "0.6", optional = true }
 emu198x-mos-6502 = { version = "0.6", optional = true }
-emu198x-mos-sid-6581 = { version = "0.7", optional = true }
+emu198x-mos-sid-6581 = { version = "0.9", optional = true }
 
 # Amiga disk images. 0.2.3 specifically: it is the release that tells a
 # non-DOS disk apart from a damaged one, and names the containers (IPF, DMS,

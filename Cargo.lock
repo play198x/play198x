@@ -37,9 +37,9 @@ dependencies = [
 
 [[package]]
 name = "emu198x-mos-sid-6581"
-version = "0.7.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33233fd4517cd1d287366c191e8a9549778011eca11316ad3d5725865ace322b"
+checksum = "a0c31229894f40a0740964029f2f4661c7795b946cb309d2401e6d52d682ba38"
 dependencies = [
  "serde",
 ]
