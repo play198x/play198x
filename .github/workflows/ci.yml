@@ -10,93 +10,21 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Read pinned toolchain
-        # rust-toolchain.toml is the single source of truth. dtolnay's action
-        # no longer auto-reads it, so extract the channel and pass it on.
-        id: toolchain
-        run: |
-          channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
-          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rustfmt
-
-      - name: Check formatting
-        run: scripts/check format
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Read pinned toolchain
-        id: toolchain
-        run: |
-          channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
-          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: clippy
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run Clippy
-        run: scripts/check lint-workspace
-
-  # Cross-platform test: the crate decodes bytes and renders audio to fixed
-  # numbers, and the tests assert those numbers, so they must run on every host
-  # rather than Linux alone — a platform drift would otherwise slip through.
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    needs: [fmt, clippy]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Read pinned toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          channel=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
-          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test-${{ matrix.os }}
-
-      - name: Test workspace
-        run: bash scripts/check test-workspace
+  # Format, Clippy, coverage (the Linux test run) and a build and test on
+  # macOS and Windows, shared by every 198x Rust repo
+  # (stevehill1981/198x-workflows). Project jobs follow.
+  rust:
+    name: Rust
+    uses: stevehill1981/198x-workflows/.github/workflows/rust-ci.yml@feat/rust-ci-inputs
+    with:
+      # Measuring: set just below the first measured figure before merge.
+      coverage-floor: 0
+      # A second Clippy and test pass with every feature on, as scripts/check does.
+      all-features: true
 
   # `play198x-web` is excluded from the workspace (see the root Cargo.toml), so
   # none of the jobs above ever build, test, or lint it. Without this job the
@@ -131,6 +59,10 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+
+      # The shell is outside the workspace, so the shared format check doesn't see it.
+      - name: Check the shell's formatting
+        run: cargo fmt --manifest-path crates/play198x-web/Cargo.toml --check
 
       # A plain `cargo test` on this crate builds for the host target and
       # silently runs zero tests: `#[wasm_bindgen_test]` only registers with
