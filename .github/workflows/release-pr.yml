@@ -1,34 +1,19 @@
 name: Release PR
 
+# The check is shared by every 198x repo (stevehill1981/198x-workflows): a
+# release PR must add a changelog heading for every version it sets.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
+concurrency:
+  group: release-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
-concurrency:
-  group: release-pr-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  changelog-version:
-    name: Released versions have changelog entries
-    if: startsWith(github.event.pull_request.title, 'chore') && contains(github.event.pull_request.title, 'release')
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Match manifest versions to added changelog headings
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          versions="$({ git diff --unified=0 "$BASE_SHA" -- '**/Cargo.toml' Cargo.toml | sed -nE 's/^\+version = "([0-9]+\.[0-9]+\.[0-9]+).*"$/\1/p'; } | sort -u)"
-          changelog_diff="$(git diff --unified=0 "$BASE_SHA" -- '**/CHANGELOG.md' CHANGELOG.md)"
-          if [[ -z "$versions" ]]; then grep -Eq '^\+## \[[0-9]+\.[0-9]+\.[0-9]+\]' <<<"$changelog_diff" || { echo 'Release PR adds neither a manifest version nor a versioned changelog heading.' >&2; exit 1; }; exit 0; fi
-          while IFS= read -r version; do
-            grep -Fq "+## [$version]" <<<"$changelog_diff" || { echo "Release PR changes a manifest to $version but adds no '## [$version]' changelog heading." >&2; exit 1; }
-          done <<<"$versions"
+  release-pr:
+    name: Release PR
+    uses: stevehill1981/198x-workflows/.github/workflows/release-pr.yml@v1
