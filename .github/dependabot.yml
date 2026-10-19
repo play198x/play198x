@@ -1,0 +1,30 @@
+# Dependabot version-update config, the same as the other 198x Rust repos.
+#
+# cargo covers the workspace's Cargo.toml and Cargo.lock; github-actions covers
+# the workflow files, including the shared stevehill1981/198x-workflows tag.
+# Minor and patch updates are grouped per ecosystem to keep PR volume low;
+# majors open their own PRs because they're likelier to need review.
+
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        update-types:
+          - "minor"
+          - "patch"
