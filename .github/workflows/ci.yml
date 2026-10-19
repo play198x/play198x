@@ -19,10 +19,10 @@ jobs:
   # (stevehill1981/198x-workflows). Project jobs follow.
   rust:
     name: Rust
-    uses: stevehill1981/198x-workflows/.github/workflows/rust-ci.yml@feat/rust-ci-inputs
+    uses: stevehill1981/198x-workflows/.github/workflows/rust-ci.yml@v1
     with:
-      # Measuring: set just below the first measured figure before merge.
-      coverage-floor: 0
+      # Measured 93.75% on 2026-10-19. Ratchet up as tests grow; never down.
+      coverage-floor: 92
       # A second Clippy and test pass with every feature on, as scripts/check does.
       all-features: true
 
