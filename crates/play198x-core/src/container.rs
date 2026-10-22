@@ -238,7 +238,10 @@ impl Container {
                         continue;
                     }
                     entries.push(Entry {
-                        path: file.name().to_owned(),
+                        // zip 9 decodes the name and reports a bad one rather
+                        // than handing back raw bytes; either way the archive
+                        // is damaged.
+                        path: file.name().map_err(damaged)?.into_owned(),
                         len: file.size(),
                     });
                 }
