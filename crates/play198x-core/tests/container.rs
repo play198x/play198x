@@ -231,15 +231,18 @@ fn an_entry_expanding_past_the_cap_is_refused_and_the_read_stops_at_the_cap() {
         "the directory has to be the one lying, or the test proves nothing"
     );
 
+    // Since zip 9 the decoder enforces the declared size itself: it stops
+    // once the stream passes the 64 bytes the directory promised, and reports
+    // the archive as damaged. That is earlier than our cap, so the bomb is
+    // never expanded, which is the property this test exists for.
     match c.read("bomb.bin") {
-        Err(Error::TooLarge { path, len, limit }) => {
-            assert_eq!(path, "bomb.bin");
-            // One byte past the cap, not seventeen mebibytes: the read itself
-            // stopped, rather than finishing and being refused afterwards.
-            assert_eq!(len, MAX_ENTRY_LEN + 1);
-            assert_eq!(limit, MAX_ENTRY_LEN);
+        Err(Error::Container { what }) => {
+            assert!(
+                what.contains("bomb.bin") && what.contains("declared uncompressed size"),
+                "expected the lie about the declared size to be named, got {what}"
+            );
         }
-        other => panic!("expected TooLarge, got {other:?}"),
+        other => panic!("expected the lying entry to be refused as damaged, got {other:?}"),
     }
 }
 
