@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/play198x/play198x/compare/play198x-core-v0.4.2...play198x-core-v0.4.3) - 2026-10-23
+
+### Dependencies
+
+- *(deps)* bump zip from 8.6.0 to 9.0.4
+- *(deps)* bump emu198x-mos-sid-6581 from 0.7.0 to 0.9.0
+- *(deps)* bump emu198x-zilog-z80 from 0.6.0 to 0.8.0
+
+### Fixed
+
+- Read zip entry names and lying entries the way zip 9 reports them
+
 ## [0.4.2](https://github.com/play198x/play198x/compare/play198x-core-v0.4.1...play198x-core-v0.4.2) - 2026-09-23
 
 ### Fixed
