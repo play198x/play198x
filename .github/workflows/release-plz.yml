@@ -17,7 +17,13 @@ jobs:
   release-plz:
     name: Release-plz
     uses: stevehill1981/198x-workflows/.github/workflows/release-plz.yml@v1
-    secrets: inherit
+    # Named, not `inherit`: GitHub passes inherited secrets only within one
+    # organisation or enterprise, and the shared workflow is in a personal
+    # account. A secret this org lacks is passed empty.
+    secrets:
+      RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+      DISCORD_RELEASE_WEBHOOK_ALL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_ALL }}
     with:
       announce: true
       # crates/play198x-web sits outside the workspace with its own lockfile,
