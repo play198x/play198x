@@ -1,0 +1,25 @@
+name: Rust toolchain
+
+# Keeps rust-toolchain.toml on the latest stable Rust: when stable moves on,
+# the family's shared workflow opens a `chore: build with Rust <version>` PR so
+# CI checks the new compiler first. Dependabot doesn't update this file.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: rust-toolchain
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  toolchain:
+    name: Rust toolchain
+    uses: stevehill1981/198x-workflows/.github/workflows/rust-toolchain.yml@v1
+    # Named, not `inherit`: inherited secrets don't cross owners.
+    secrets:
+      RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
