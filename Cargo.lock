@@ -82,9 +82,9 @@ dependencies = [
 
 [[package]]
 name = "format198x-commodore-amiga-adf"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ed288a79912b3af0eafa304afb2ff2ac27668ba88efcce03ef2a1b3ae9c0bca"
+checksum = "5c4569cb4196025141d21f88d23f587a857c094cda82b2f6f656a9b8f433f544"
 
 [[package]]
 name = "format198x-commodore-amiga-ilbm"
@@ -260,9 +260,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "zip"
-version = "9.0.4"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
