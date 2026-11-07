@@ -390,13 +390,15 @@ fn a_hostile_archive_never_panics_and_never_reads_bytes_that_are_not_there() {
     );
 }
 
-// Measured on 2026-08-26 with `zip` 8.6.0, by counting a run of the sweep
-// above. They are pinned rather than bounded because a bare "more than zero"
+// Measured with `zip` 9.1.3 by counting a run of the sweep above. Since zip
+// 9.1 an entry whose mutated name decodes as CP437 is found by that decoded
+// name, so the seven flips of the central-directory name read back. They are
+// pinned rather than bounded because a bare "more than zero"
 // would pass a regression that opened everything and read nothing.
 const OPENED: usize = 86;
 const LISTED: usize = 82;
-const READ_OK: usize = 58;
-const READ_ERR: usize = 24;
+const READ_OK: usize = 65;
+const READ_ERR: usize = 17;
 
 /// A ZIP is recognised by its bytes, not by what the file is called.
 #[test]
