@@ -64,9 +64,9 @@ dependencies = [
 
 [[package]]
 name = "emu198x-zilog-z80"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8d2e3e41d96d4e0b7ce4f508dc193d394d12cfed9388cd8c74b7f388ade04f5"
+checksum = "bb7caf1f7f56be3bbbc5315162fda69cf0c30cd32701b75f3a607af612359b99"
 dependencies = [
  "serde",
 ]
