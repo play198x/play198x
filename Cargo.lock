@@ -27,6 +27,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "constant_time_eq"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -88,9 +97,9 @@ dependencies = [
 
 [[package]]
 name = "format198x-commodore-amiga-adf"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c4569cb4196025141d21f88d23f587a857c094cda82b2f6f656a9b8f433f544"
+checksum = "b262cf6711879576d99e337e2cb36ce5c97261b16d7247cf1129b5e2fc11d64e"
 
 [[package]]
 name = "format198x-commodore-amiga-ilbm"
@@ -273,7 +282,18 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.4",
+]
+
+[[package]]
+name = "syn"
+version = "2.0.119"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -330,7 +350,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.4",
  "wasm-bindgen-shared",
 ]
 
@@ -359,19 +379,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "zip"
-version = "9.1.3"
+name = "zeroize"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "zip"
+version = "9.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3476fd497ac8af5b1ec7b51acab7bef380f7e8dd8e0487595bafd839417a302"
+dependencies = [
+ "constant_time_eq",
  "crc32fast",
  "flate2",
  "getrandom",
  "indexmap",
+ "libc",
  "memchr",
  "nix",
  "typed-path",
  "windows-sys",
+ "zeroize",
 ]
 
 [[package]]
